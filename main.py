@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.0.6"
+__version__ = "0.0.7"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
