@@ -18,45 +18,46 @@ func chdir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 }
 
-func TestParseVersion(t *testing.T) {
+func TestCanonGoVersion(t *testing.T) {
 	cases := []struct {
-		in   string
-		want goVersion
+		in, want string
 	}{
-		{"1.22", goVersion{1, 22, 0}},
-		{"1.22.3", goVersion{1, 22, 3}},
-		{"1.22.0", goVersion{1, 22, 0}},
-		{"go1.22.3", goVersion{1, 22, 3}},
-		{"1.22-rc1", goVersion{1, 22, 1}},
-		{"v1.22.3", goVersion{1, 22, 3}},
-		{"", goVersion{0, 0, 0}},
-		{"1", goVersion{1, 0, 0}},
-		{"1.22.3.4", goVersion{1, 22, 3}}, // 4th part dropped
+		{"1.22", "v1.22.0"},
+		{"1.22.3", "v1.22.3"},
+		{"1.22.0", "v1.22.0"},
+		{"go1.22.3", "v1.22.3"},
+		{"1.22rc1", "v1.22.0"},   // pre-release stripped
+		{"1.22-rc1", "v1.22.0"},  // pre-release stripped
+		{"v1.22.3", "v1.22.3"},
+		{"", "v0.0.0"},
+		{"1", "v1.0.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			if got := parseVersion(tc.in); got != tc.want {
-				t.Errorf("parseVersion(%q) = %v, want %v", tc.in, got, tc.want)
+			if got := canonGoVersion(tc.in); got != tc.want {
+				t.Errorf("canonGoVersion(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestGoVersionCompare(t *testing.T) {
+func TestCompareGo(t *testing.T) {
 	cases := []struct {
-		a, b goVersion
+		a, b string
 		want int
 	}{
-		{goVersion{1, 22, 0}, goVersion{1, 22, 0}, 0},
-		{goVersion{1, 21, 0}, goVersion{1, 22, 0}, -1},
-		{goVersion{1, 22, 1}, goVersion{1, 22, 0}, 1},
-		{goVersion{1, 22, 0}, goVersion{1, 22, 1}, -1},
-		{goVersion{2, 0, 0}, goVersion{1, 99, 99}, 1},
-		{goVersion{1, 22, 3}, goVersion{1, 22, 3}, 0},
+		{"1.22", "1.22.0", 0},
+		{"1.21", "1.22", -1},
+		{"1.22.1", "1.22", 1},
+		{"1.22", "1.22.1", -1},
+		{"2.0", "1.99.99", 1},
+		{"1.22.3", "1.22.3", 0},
+		{"go1.22", "1.22.0", 0},
+		{"1.22rc1", "1.22", 0}, // rc dropped, equals release
 	}
 	for _, tc := range cases {
-		if got := tc.a.Compare(tc.b); got != tc.want {
-			t.Errorf("%v.Compare(%v) = %d, want %d", tc.a, tc.b, got, tc.want)
+		if got := compareGo(tc.a, tc.b); got != tc.want {
+			t.Errorf("compareGo(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
 		}
 	}
 }

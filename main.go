@@ -7,18 +7,17 @@
 package main
 
 import (
-	"bufio"
-	"cmp"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -38,33 +37,28 @@ func errlog(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, colRed+"ERROR"+colReset+": "+format+"\n", a...)
 }
 
-var (
-	goLineRe   = regexp.MustCompile(`^go\s+(\S+)`)
-	versionSep = regexp.MustCompile(`[.\-]`)
-	digitsRe   = regexp.MustCompile(`\d+`)
-)
-
-type goVersion [3]int
-
-func parseVersion(v string) goVersion {
-	parts := versionSep.Split(v, -1)
-	var out goVersion
-	for i := 0; i < 3 && i < len(parts); i++ {
-		if m := digitsRe.FindString(parts[i]); m != "" {
-			out[i], _ = strconv.Atoi(m)
+// canonGoVersion returns a semver-canonical "vMAJOR.MINOR.PATCH" form for
+// a Go directive value like "1.24", "1.24.3", "go1.24.3", or "1.24rc1".
+// Pre-release suffixes (rc1, beta1, etc.) are dropped — we treat them as
+// the underlying release for compatibility comparisons.
+func canonGoVersion(v string) string {
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimPrefix(v, "go")
+	for i, r := range v {
+		if !(r >= '0' && r <= '9' || r == '.') {
+			v = v[:i]
+			break
 		}
 	}
-	return out
+	v = strings.TrimRight(v, ".")
+	if v == "" {
+		return "v0.0.0"
+	}
+	return semver.Canonical("v" + v)
 }
 
-func (a goVersion) Compare(b goVersion) int {
-	for i := range a {
-		if c := cmp.Compare(a[i], b[i]); c != 0 {
-			return c
-		}
-	}
-	return 0
-}
+// compareGo orders two Go directive values; returns -1, 0, or 1.
+func compareGo(a, b string) int { return semver.Compare(canonGoVersion(a), canonGoVersion(b)) }
 
 func goEnv() []string { return append(os.Environ(), "GOTOOLCHAIN=local") }
 
@@ -98,18 +92,15 @@ func declaredGo(mod, ver string) string {
 	if err := json.Unmarshal([]byte(stdout), &meta); err != nil || meta.GoMod == "" {
 		return ""
 	}
-	f, err := os.Open(meta.GoMod)
+	data, err := os.ReadFile(meta.GoMod)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if m := goLineRe.FindStringSubmatch(sc.Text()); m != nil {
-			return m[1]
-		}
+	f, err := modfile.ParseLax(meta.GoMod, data, nil)
+	if err != nil || f.Go == nil {
+		return "1.0"
 	}
-	return "1.0"
+	return f.Go.Version
 }
 
 // listVersions returns versions newest-first.
@@ -127,13 +118,13 @@ func listVersions(mod string) []string {
 	return vs
 }
 
-func pickVersion(mod string, target goVersion) (ver, declared string, ok bool) {
+func pickVersion(mod, target string) (ver, declared string, ok bool) {
 	for _, v := range listVersions(mod) {
 		gv := declaredGo(mod, v)
 		if gv == "" {
 			continue
 		}
-		if parseVersion(gv).Compare(target) <= 0 {
+		if compareGo(gv, target) <= 0 {
 			return v, gv, true
 		}
 	}
@@ -177,7 +168,7 @@ func (s set) sorted() []string {
 
 // pinBatch probes versions for each mod in parallel, then `go get`s them serially.
 // Returns mods for which no compatible version exists.
-func pinBatch(mods []string, target goVersion, label string, jobs int) set {
+func pinBatch(mods []string, target, label string, jobs int) set {
 	type result struct {
 		mod, ver, gv string
 		ok           bool
@@ -242,8 +233,7 @@ func (s snapshot) restore() {
 }
 
 func run(target string, rounds, jobs int, noTidy bool) error {
-	tgt := parseVersion(target)
-	canonical := fmt.Sprintf("%d.%d.%d", tgt[0], tgt[1], tgt[2])
+	canonical := strings.TrimPrefix(canonGoVersion(target), "v")
 
 	if _, stderr, err := runCapture("go", "mod", "edit", "-go="+target, "-toolchain=none"); err != nil {
 		return fmt.Errorf("go mod edit: %w\n%s", err, stderr)
@@ -254,7 +244,7 @@ func run(target string, rounds, jobs int, noTidy bool) error {
 	for _, r := range listModules(true) {
 		direct = append(direct, r.Path)
 	}
-	if bad := pinBatch(direct, tgt, "", jobs); len(bad) > 0 {
+	if bad := pinBatch(direct, target, "", jobs); len(bad) > 0 {
 		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s",
 			canonical, strings.Join(bad.sorted(), ", "))
 	}
@@ -263,7 +253,7 @@ func run(target string, rounds, jobs int, noTidy bool) error {
 	for n := 1; n <= rounds; n++ {
 		var offenders []string
 		for _, r := range listModules(false) {
-			if r.GoVersion != "" && parseVersion(r.GoVersion).Compare(tgt) > 0 && !skip.has(r.Path) {
+			if r.GoVersion != "" && compareGo(r.GoVersion, target) > 0 && !skip.has(r.Path) {
 				offenders = append(offenders, r.Path)
 			}
 		}
@@ -277,7 +267,7 @@ func run(target string, rounds, jobs int, noTidy bool) error {
 			return nil
 		}
 		info("Round %d: %d offending indirect(s)", n, len(offenders))
-		for m := range pinBatch(offenders, tgt, fmt.Sprintf("[round %d] ", n), jobs) {
+		for m := range pinBatch(offenders, target, fmt.Sprintf("[round %d] ", n), jobs) {
 			skip.add(m)
 		}
 	}

@@ -16,13 +16,15 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.0.1"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
 
 
-def run(*args: str, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    *args: str, check: bool = True, capture: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         check=check,
@@ -80,8 +82,12 @@ def pick_version(mod: str, target: GoVersion) -> tuple[str, str] | None:
 
 def list_modules(direct_only: bool) -> list[tuple[str, str, str]]:
     """Return (path, version, goversion) for selected modules; fields may be ''."""
-    fmt = "{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.GoVersion}}\t{{.Indirect}}{{end}}"
-    out = run("go", "list", "-mod=mod", "-e", "-m", "-f", fmt, "all", check=False).stdout
+    fmt = (
+        "{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.GoVersion}}\t{{.Indirect}}{{end}}"
+    )
+    out = run(
+        "go", "list", "-mod=mod", "-e", "-m", "-f", fmt, "all", check=False
+    ).stdout
     rows: list[tuple[str, str, str]] = []
     for line in out.splitlines():
         if not line.strip():
@@ -119,7 +125,10 @@ def pin_batch(mods: list[str], target: GoVersion, label: str, workers: int) -> s
 
 def backup_modfiles() -> dict[Path, bytes | None]:
     """Snapshot go.mod and go.sum (None if a file doesn't exist)."""
-    return {p: (p.read_bytes() if p.exists() else None) for p in (Path("go.mod"), Path("go.sum"))}
+    return {
+        p: (p.read_bytes() if p.exists() else None)
+        for p in (Path("go.mod"), Path("go.sum"))
+    }
 
 
 def restore_modfiles(snapshot: dict[Path, bytes | None]) -> None:
@@ -131,13 +140,25 @@ def restore_modfiles(snapshot: dict[Path, bytes | None]) -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument("dir", help="Path to module directory containing go.mod")
-    parser.add_argument("target", nargs="?", default="1.24", help="Target Go version (default: 1.24)")
-    parser.add_argument("--rounds", type=int, default=5, help="Max indirect-fixup rounds (default: 5)")
-    parser.add_argument("-j", "--jobs", type=int, default=8, help="Parallel version probes (default: 8)")
-    parser.add_argument("--no-tidy", action="store_true", help="Skip the final `go mod tidy`")
+    parser.add_argument(
+        "target", nargs="?", default="1.24", help="Target Go version (default: 1.24)"
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=5, help="Max indirect-fixup rounds (default: 5)"
+    )
+    parser.add_argument(
+        "-j", "--jobs", type=int, default=8, help="Parallel version probes (default: 8)"
+    )
+    parser.add_argument(
+        "--no-tidy", action="store_true", help="Skip the final `go mod tidy`"
+    )
     return parser.parse_args(argv)
 
 
@@ -147,7 +168,9 @@ def _main(args: argparse.Namespace) -> None:
 
     run("go", "mod", "edit", f"-go={args.target}", "-toolchain=none")
 
-    logging.info("Pinning direct deps to highest version with go <= %s", target_canonical)
+    logging.info(
+        "Pinning direct deps to highest version with go <= %s", target_canonical
+    )
     direct = [p for p, _, _ in list_modules(direct_only=True)]
     unresolvable = pin_batch(direct, target, label="", workers=args.jobs)
     if unresolvable:
@@ -165,16 +188,25 @@ def _main(args: argparse.Namespace) -> None:
         if not offenders:
             break
         logging.info("Round %d: %d offending indirect(s)", round_n, len(offenders))
-        skip |= pin_batch(offenders, target, label=f"[round {round_n}] ", workers=args.jobs)
+        skip |= pin_batch(
+            offenders, target, label=f"[round {round_n}] ", workers=args.jobs
+        )
     else:
-        raise RuntimeError(f"hit max rounds ({args.rounds}); indirects still violate target")
+        raise RuntimeError(
+            f"hit max rounds ({args.rounds}); indirects still violate target"
+        )
 
     if not args.no_tidy:
         run("go", "mod", "tidy", f"-go={target_canonical}", capture=False)
     logging.info("Done. go directive: %s", target_canonical)
 
 
-COLORS = {"green": "\033[32m", "red": "\033[31m", "yellow": "\033[33m", "reset": "\033[0m"}
+COLORS = {
+    "green": "\033[32m",
+    "red": "\033[31m",
+    "yellow": "\033[33m",
+    "reset": "\033[0m",
+}
 
 
 def main() -> None:
