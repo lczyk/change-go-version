@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
@@ -146,40 +146,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    parser.add_argument("dir", help="Path to module directory containing go.mod")
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_change = sub.add_parser("change", help="Set go directive to a specific target")
+    p_change.add_argument(
         "target", nargs="?", default="1.24", help="Target Go version (default: 1.24)"
     )
-    parser.add_argument(
-        "--rounds", type=int, default=5, help="Max indirect-fixup rounds (default: 5)"
+    p_change.add_argument(
+        "-d", "--dir", default=".", help="Module directory containing go.mod (default: .)"
     )
-    parser.add_argument(
-        "-j", "--jobs", type=int, default=8, help="Parallel version probes (default: 8)"
+    p_change.add_argument("--rounds", type=int, default=5)
+    p_change.add_argument("-j", "--jobs", type=int, default=8)
+    p_change.add_argument("--no-tidy", action="store_true")
+
+    p_auto = sub.add_parser(
+        "auto",
+        help="Walk go directive down per minor; apply lowest version where --check passes",
     )
-    parser.add_argument(
-        "--no-tidy", action="store_true", help="Skip the final `go mod tidy`"
+    p_auto.add_argument(
+        "-d", "--dir", default=".", help="Module directory containing go.mod (default: .)"
     )
+    p_auto.add_argument(
+        "--check",
+        required=True,
+        help="Verification command, e.g. 'go test ./...'",
+    )
+    p_auto.add_argument("--rounds", type=int, default=5)
+    p_auto.add_argument("-j", "--jobs", type=int, default=8)
+    p_auto.add_argument("--no-tidy", action="store_true")
+
     return parser.parse_args(argv)
 
 
-def _main(args: argparse.Namespace) -> None:
-    target = norm(args.target)
+def run_change(target_str: str, rounds: int, jobs: int, no_tidy: bool) -> None:
+    target = norm(target_str)
     target_canonical = f"{target[0]}.{target[1]}.{target[2]}"
 
-    run("go", "mod", "edit", f"-go={args.target}", "-toolchain=none")
+    run("go", "mod", "edit", f"-go={target_str}", "-toolchain=none")
 
     logging.info(
         "Pinning direct deps to highest version with go <= %s", target_canonical
     )
     direct = [p for p, _, _ in list_modules(direct_only=True)]
-    unresolvable = pin_batch(direct, target, label="", workers=args.jobs)
+    unresolvable = pin_batch(direct, target, label="", workers=jobs)
     if unresolvable:
         raise RuntimeError(
             f"no version compatible with go {target_canonical} for direct dep(s): {', '.join(sorted(unresolvable))}"
         )
 
     skip: set[str] = set()
-    for round_n in range(1, args.rounds + 1):
+    for round_n in range(1, rounds + 1):
         offenders = [
             path
             for path, _, gv in list_modules(direct_only=False)
@@ -188,17 +204,65 @@ def _main(args: argparse.Namespace) -> None:
         if not offenders:
             break
         logging.info("Round %d: %d offending indirect(s)", round_n, len(offenders))
-        skip |= pin_batch(
-            offenders, target, label=f"[round {round_n}] ", workers=args.jobs
-        )
+        skip |= pin_batch(offenders, target, label=f"[round {round_n}] ", workers=jobs)
     else:
-        raise RuntimeError(
-            f"hit max rounds ({args.rounds}); indirects still violate target"
-        )
+        raise RuntimeError(f"hit max rounds ({rounds}); indirects still violate target")
 
-    if not args.no_tidy:
+    if not no_tidy:
         run("go", "mod", "tidy", f"-go={target_canonical}", capture=False)
     logging.info("Done. go directive: %s", target_canonical)
+
+
+def read_local_go_directive() -> str:
+    """Return the `go` directive value from ./go.mod (e.g. '1.22')."""
+    for line in Path("go.mod").read_text().splitlines():
+        m = re.match(r"^go\s+(\S+)", line)
+        if m:
+            return m.group(1)
+    raise RuntimeError("go.mod has no go directive")
+
+
+def minor_of(version: str) -> int:
+    """Return the X in 1.X.Y from a Go version string."""
+    parts = norm(version)
+    return parts[1]
+
+
+def run_check(cmd: str) -> bool:
+    """Run user verification command via shell. True if exit code 0."""
+    return subprocess.run(cmd, shell=True).returncode == 0
+
+
+def run_auto(check_cmd: str, rounds: int, jobs: int, no_tidy: bool) -> None:
+    initial = read_local_go_directive()
+    logging.info("Auto: baseline go %s; verifying check command...", initial)
+    if not run_check(check_cmd):
+        raise RuntimeError(f"baseline check failed at go {initial}")
+
+    baseline = backup_modfiles()
+    last_good = initial
+    last_good_snap = baseline
+    for x in range(minor_of(initial) - 1, -1, -1):
+        cand = f"1.{x}"
+        logging.info("Auto: trying go %s ...", cand)
+        restore_modfiles(baseline)
+        try:
+            run_change(cand, rounds, jobs, no_tidy)
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            logging.warning("Auto: change to %s failed: %s", cand, e)
+            break
+        if not run_check(check_cmd):
+            logging.warning("Auto: check failed at go %s", cand)
+            break
+        logging.info("Auto: go %s passed", cand)
+        last_good = cand
+        last_good_snap = backup_modfiles()
+
+    restore_modfiles(last_good_snap)
+    if norm(last_good) == norm(initial):
+        logging.info("Auto: no version below %s passes; baseline restored", initial)
+    else:
+        logging.info("Auto: lowest passing go version: %s (applied)", last_good)
 
 
 COLORS = {
@@ -230,7 +294,10 @@ def main() -> None:
         sys.exit(1)
     snapshot = backup_modfiles()
     try:
-        _main(args)
+        if args.cmd == "change":
+            run_change(args.target, args.rounds, args.jobs, args.no_tidy)
+        elif args.cmd == "auto":
+            run_auto(args.check, args.rounds, args.jobs, args.no_tidy)
     except KeyboardInterrupt:
         logging.error("Interrupted; restoring go.mod and go.sum")
         restore_modfiles(snapshot)

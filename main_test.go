@@ -122,6 +122,39 @@ func TestSnapshotBackupRestore(t *testing.T) {
 	}
 }
 
+func TestMinorOf(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"v1.22.3", 22},
+		{"v1.0.0", 0},
+		{"v2.7.1", 7},
+		{"", 0},
+		{"v1", 0},
+	}
+	for _, tc := range cases {
+		if got := minorOf(tc.in); got != tc.want {
+			t.Errorf("minorOf(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestReadLocalGoDirective(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.WriteFile("go.mod", []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readLocalGoDirective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.22" {
+		t.Errorf("got %q, want %q", got, "1.22")
+	}
+}
+
 func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)

@@ -8,14 +8,15 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
+	flags "github.com/jessevdk/go-flags"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
@@ -264,7 +265,42 @@ func (s snapshot) restore() {
 	}
 }
 
-func run(target string, rounds, jobs int, noTidy bool) error {
+// minorOf returns the second component (X) of a canonical "vMAJOR.MINOR.PATCH" Go version.
+func minorOf(canonical string) int {
+	s := strings.TrimPrefix(canonical, "v")
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(parts[1])
+	return n
+}
+
+// readLocalGoDirective returns the `go` directive value from ./go.mod (e.g. "1.22").
+func readLocalGoDirective() (string, error) {
+	data, err := os.ReadFile("go.mod")
+	if err != nil {
+		return "", err
+	}
+	f, err := modfile.ParseLax("go.mod", data, nil)
+	if err != nil {
+		return "", err
+	}
+	if f.Go == nil {
+		return "", fmt.Errorf("go.mod has no go directive")
+	}
+	return f.Go.Version, nil
+}
+
+// runCheck runs the user's verification command via /bin/sh -c, streaming stdio.
+func runCheck(cmd string) error {
+	c := exec.Command("sh", "-c", cmd)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
+}
+
+func runChange(target string, rounds, jobs int, noTidy bool) error {
 	canonical := strings.TrimPrefix(canonGoVersion(target), "v")
 
 	if err := editLocalGoMod(target); err != nil {
@@ -306,40 +342,123 @@ func run(target string, rounds, jobs int, noTidy bool) error {
 	return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
 }
 
-func main() {
-	rounds := flag.Int("rounds", 5, "Max indirect-fixup rounds")
-	jobs := flag.Int("j", 8, "Parallel version probes")
-	noTidy := flag.Bool("no-tidy", false, "Skip the final `go mod tidy`")
-	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: change-go-version [flags] <dir> [target]\n\nSee https://github.com/lczyk/change-go-version")
-		flag.PrintDefaults()
+// runAuto walks the go directive downwards (one minor at a time) to find the
+// lowest version where checkCmd still exits 0. The lowest passing version is
+// applied at the end; on no improvement, baseline is restored.
+func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
+	initial, err := readLocalGoDirective()
+	if err != nil {
+		return err
 	}
-	flag.Parse()
-
-	if flag.NArg() < 1 {
-		flag.Usage()
-		os.Exit(2)
-	}
-	dir := flag.Arg(0)
-	target := "1.24"
-	if flag.NArg() > 1 {
-		target = flag.Arg(1)
+	info("Auto: baseline go %s; verifying check command...", initial)
+	if err := runCheck(checkCmd); err != nil {
+		return fmt.Errorf("baseline check failed at go %s: %w", initial, err)
 	}
 
+	startMinor := minorOf(canonGoVersion(initial))
+	lastGood := initial
+	lastGoodSnap := baseline
+	for x := startMinor - 1; x >= 0; x-- {
+		cand := fmt.Sprintf("1.%d", x)
+		info("Auto: trying go %s ...", cand)
+		baseline.restore()
+		if err := runChange(cand, rounds, jobs, noTidy); err != nil {
+			warn("Auto: change to %s failed: %v", cand, err)
+			break
+		}
+		if err := runCheck(checkCmd); err != nil {
+			warn("Auto: check failed at go %s", cand)
+			break
+		}
+		info("Auto: go %s passed", cand)
+		lastGood = cand
+		lastGoodSnap = backupModFiles()
+	}
+
+	lastGoodSnap.restore()
+	if canonGoVersion(lastGood) == canonGoVersion(initial) {
+		info("Auto: no version below %s passes; baseline restored", initial)
+	} else {
+		info("Auto: lowest passing go version: %s (applied)", lastGood)
+	}
+	return nil
+}
+
+type changeCmd struct {
+	Args struct {
+		Target string `positional-arg-name:"target" description:"target Go version (e.g. 1.22; default 1.24)"`
+	} `positional-args:"yes"`
+	Dir    string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
+	Rounds int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
+	Jobs   int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
+	NoTidy bool   `long:"no-tidy" description:"skip the final go mod tidy"`
+}
+
+func (c *changeCmd) Execute(_ []string) error {
+	target := c.Args.Target
+	if target == "" {
+		target = "1.24"
+	}
+	return inDir(c.Dir, func() error {
+		snap := backupModFiles()
+		if err := runChange(target, c.Rounds, c.Jobs, c.NoTidy); err != nil {
+			errlog("%v", err)
+			errlog("Restoring go.mod and go.sum to original state")
+			snap.restore()
+			return err
+		}
+		return nil
+	})
+}
+
+type autoCmd struct {
+	Dir    string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
+	Check  string `long:"check" required:"true" description:"verification command, e.g. 'go test ./...'"`
+	Rounds int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
+	Jobs   int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
+	NoTidy bool   `long:"no-tidy" description:"skip the final go mod tidy"`
+}
+
+func (a *autoCmd) Execute(_ []string) error {
+	return inDir(a.Dir, func() error {
+		snap := backupModFiles()
+		if err := runAuto(a.Check, a.Rounds, a.Jobs, a.NoTidy, snap); err != nil {
+			errlog("%v", err)
+			errlog("Restoring go.mod and go.sum to original state")
+			snap.restore()
+			return err
+		}
+		return nil
+	})
+}
+
+func inDir(dir string, fn func() error) error {
 	if err := os.Chdir(dir); err != nil {
-		errlog("chdir %s: %v", dir, err)
-		os.Exit(1)
+		return fmt.Errorf("chdir %s: %w", dir, err)
 	}
 	if _, err := os.Stat("go.mod"); err != nil {
-		errlog("no go.mod in %s", dir)
+		return fmt.Errorf("no go.mod in %s", dir)
+	}
+	return fn()
+}
+
+func main() {
+	parser := flags.NewParser(nil, flags.Default)
+	parser.Name = "change-go-version"
+	parser.LongDescription = "Move a Go module's go directive (and deps) to a target version. See https://github.com/lczyk/change-go-version"
+	if _, err := parser.AddCommand("change", "Set go directive to a specific target", "Pin go directive and walk deps down/up to fit.", &changeCmd{}); err != nil {
+		errlog("%v", err)
 		os.Exit(1)
 	}
-
-	snap := backupModFiles()
-	if err := run(target, *rounds, *jobs, *noTidy); err != nil {
+	if _, err := parser.AddCommand("auto", "Find lowest passing go version", "Walks go directive down (per minor) until --check fails; applies last passing version.", &autoCmd{}); err != nil {
 		errlog("%v", err)
-		errlog("Restoring go.mod and go.sum to original state")
-		snap.restore()
+		os.Exit(1)
+	}
+	if _, err := parser.Parse(); err != nil {
+		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 }
+

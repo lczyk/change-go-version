@@ -16,23 +16,37 @@ why might you want to downgrade your go version? just read https://blog.howardjo
 
 ## usage
 
-```sh
-go run github.com/lczyk/change-go-version@latest . 1.24
-```
+two subcommands: `change` (pin to a specific version) and `auto` (find lowest version that still passes a check command).
 
-first arg is the path to the module directory (where `go.mod` lives), second is the target Go version.
+```sh
+# pin go directive to 1.24 in current dir
+go run github.com/lczyk/change-go-version@latest change 1.24
+
+# pin in some other dir
+go run github.com/lczyk/change-go-version@latest change 1.24 --dir path/to/module
+
+# walk down from current go directive; apply lowest version where tests pass
+go run github.com/lczyk/change-go-version@latest auto --check "go test ./..."
+```
 
 ## flags
 
 ```
-change-go-version [flags] <dir> [target]
+change [target] [--dir D] [--rounds N] [-j N] [--no-tidy]
+  target            Target Go version (default: 1.24)
+  -d, --dir         Module directory containing go.mod (default: .)
+  --rounds          Max indirect-fixup rounds (default: 5)
+  -j, --jobs        Parallel version probes (default: 8)
+  --no-tidy         Skip the final `go mod tidy`
 
-  dir               Path to module directory containing go.mod (required).
-  target            Target Go version (default: 1.24). E.g. 1.21, 1.24, 1.25.
-  -rounds int       Max indirect-fixup rounds (default: 5)
-  -j int            Parallel version probes (default: 8)
-  -no-tidy          Skip the final `go mod tidy`
+auto --check "<cmd>" [--dir D] [--rounds N] [-j N] [--no-tidy]
+  --check           Verification command run via /bin/sh -c. Required.
+  ... shared flags as above
 ```
+
+## auto mode
+
+reads the current `go` directive, verifies `--check` passes at the baseline, then for each minor version below current (e.g. 1.24 → 1.23 → 1.22 …) it: restores the original `go.mod`/`go.sum`, runs `change` to that candidate, then runs `--check`. it stops on the first failure. the lowest passing version is left applied; if nothing below the baseline passes, baseline is restored unchanged.
 
 ## behaviour
 

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 __project_root__ = Path(__file__).resolve().parent
 VERSION_FILE = __project_root__ / "VERSION"
 
@@ -12,3 +14,78 @@ def test_version_matches_VERSION_file() -> None:
         f"Version mismatch: __version__={__version__!r} in main.py vs "
         f"{file_version!r} in VERSION. VERSION file is source of truth."
     )
+
+
+def test_norm() -> None:
+    from main import norm
+
+    assert norm("1.22") == (1, 22, 0)
+    assert norm("1.22.3") == (1, 22, 3)
+    assert norm("1.22-rc1") == (1, 22, 0)  # 'rc1' has no leading digit
+    assert norm("v1.22.3") == (0, 22, 3)  # 'v1' has no leading digit
+    assert norm("") == (0, 0, 0)
+    assert norm("1") == (1, 0, 0)
+
+
+def test_minor_of() -> None:
+    from main import minor_of
+
+    assert minor_of("1.22") == 22
+    assert minor_of("1.22.3") == 22
+    assert minor_of("v1.22.3") == 22
+    assert minor_of("") == 0
+
+
+def test_read_local_go_directive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from main import read_local_go_directive
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "go.mod").write_text("module x\n\ngo 1.22\n")
+    assert read_local_go_directive() == "1.22"
+
+
+def test_run_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    from main import run_check
+
+    assert run_check("true") is True
+    assert run_check("false") is False
+
+
+def test_parse_args_change_minimal() -> None:
+    from main import parse_args
+
+    args = parse_args(["change"])
+    assert args.cmd == "change"
+    assert args.dir == "."
+    assert args.target == "1.24"
+    assert args.rounds == 5
+    assert args.jobs == 8
+    assert args.no_tidy is False
+
+
+def test_parse_args_change_with_dir_and_target() -> None:
+    from main import parse_args
+
+    args = parse_args(["change", "1.22", "--dir", "/tmp/x"])
+    assert args.cmd == "change"
+    assert args.dir == "/tmp/x"
+    assert args.target == "1.22"
+
+
+def test_parse_args_auto_requires_check() -> None:
+    from main import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["auto"])
+
+
+def test_parse_args_auto_full() -> None:
+    from main import parse_args
+
+    args = parse_args(["auto", "--check", "go test ./...", "--rounds", "3"])
+    assert args.cmd == "auto"
+    assert args.dir == "."
+    assert args.check == "go test ./..."
+    assert args.rounds == 3
