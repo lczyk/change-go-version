@@ -384,52 +384,13 @@ func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) 
 	return nil
 }
 
-type changeCmd struct {
-	Args struct {
-		Target string `positional-arg-name:"target" description:"target Go version (e.g. 1.22; default 1.24)"`
-	} `positional-args:"yes"`
+type options struct {
+	To     string `long:"to" description:"target Go version, e.g. 1.22 (mutually exclusive with --auto)"`
+	Auto   string `long:"auto" description:"verification command run via /bin/sh -c; finds lowest passing version (mutually exclusive with --to)"`
 	Dir    string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
 	Rounds int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
 	Jobs   int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
 	NoTidy bool   `long:"no-tidy" description:"skip the final go mod tidy"`
-}
-
-func (c *changeCmd) Execute(_ []string) error {
-	target := c.Args.Target
-	if target == "" {
-		target = "1.24"
-	}
-	return inDir(c.Dir, func() error {
-		snap := backupModFiles()
-		if err := runChange(target, c.Rounds, c.Jobs, c.NoTidy); err != nil {
-			errlog("%v", err)
-			errlog("Restoring go.mod and go.sum to original state")
-			snap.restore()
-			return err
-		}
-		return nil
-	})
-}
-
-type autoCmd struct {
-	Dir    string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
-	Check  string `long:"check" required:"true" description:"verification command, e.g. 'go test ./...'"`
-	Rounds int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
-	Jobs   int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
-	NoTidy bool   `long:"no-tidy" description:"skip the final go mod tidy"`
-}
-
-func (a *autoCmd) Execute(_ []string) error {
-	return inDir(a.Dir, func() error {
-		snap := backupModFiles()
-		if err := runAuto(a.Check, a.Rounds, a.Jobs, a.NoTidy, snap); err != nil {
-			errlog("%v", err)
-			errlog("Restoring go.mod and go.sum to original state")
-			snap.restore()
-			return err
-		}
-		return nil
-	})
 }
 
 func inDir(dir string, fn func() error) error {
@@ -443,22 +404,39 @@ func inDir(dir string, fn func() error) error {
 }
 
 func main() {
-	parser := flags.NewParser(nil, flags.Default)
+	var opts options
+	parser := flags.NewParser(&opts, flags.Default)
 	parser.Name = "change-go-version"
-	parser.LongDescription = "Move a Go module's go directive (and deps) to a target version. See https://github.com/lczyk/change-go-version"
-	if _, err := parser.AddCommand("change", "Set go directive to a specific target", "Pin go directive and walk deps down/up to fit.", &changeCmd{}); err != nil {
-		errlog("%v", err)
-		os.Exit(1)
-	}
-	if _, err := parser.AddCommand("auto", "Find lowest passing go version", "Walks go directive down (per minor) until --check fails; applies last passing version.", &autoCmd{}); err != nil {
-		errlog("%v", err)
-		os.Exit(1)
-	}
+	parser.LongDescription = "Move a Go module's go directive (and deps) to a target version, or find the lowest passing version automatically. See https://github.com/lczyk/change-go-version"
 	if _, err := parser.Parse(); err != nil {
 		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
 			os.Exit(0)
 		}
 		os.Exit(1)
 	}
-}
 
+	if (opts.To == "") == (opts.Auto == "") {
+		errlog("exactly one of --to or --auto is required")
+		os.Exit(2)
+	}
+
+	err := inDir(opts.Dir, func() error {
+		snap := backupModFiles()
+		var runErr error
+		if opts.To != "" {
+			runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
+		} else {
+			runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
+		}
+		if runErr != nil {
+			errlog("%v", runErr)
+			errlog("Restoring go.mod and go.sum to original state")
+			snap.restore()
+			return runErr
+		}
+		return nil
+	})
+	if err != nil {
+		os.Exit(1)
+	}
+}

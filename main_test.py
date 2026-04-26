@@ -53,39 +53,34 @@ def test_run_check(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_check("false") is False
 
 
-def test_parse_args_change_minimal() -> None:
+def test_parse_args_to() -> None:
     from main import parse_args
 
-    args = parse_args(["change"])
-    assert args.cmd == "change"
-    assert args.dir == "."
-    assert args.target == "1.24"
-    assert args.rounds == 5
-    assert args.jobs == 8
-    assert args.no_tidy is False
-
-
-def test_parse_args_change_with_dir_and_target() -> None:
-    from main import parse_args
-
-    args = parse_args(["change", "1.22", "--dir", "/tmp/x"])
-    assert args.cmd == "change"
+    args = parse_args(["--to", "1.22", "--dir", "/tmp/x"])
+    assert args.to == "1.22"
+    assert args.auto is None
     assert args.dir == "/tmp/x"
-    assert args.target == "1.22"
 
 
-def test_parse_args_auto_requires_check() -> None:
+def test_parse_args_auto() -> None:
+    from main import parse_args
+
+    args = parse_args(["--auto", "go test ./...", "--rounds", "3"])
+    assert args.to is None
+    assert args.auto == "go test ./..."
+    assert args.dir == "."
+    assert args.rounds == 3
+
+
+def test_parse_args_requires_one_mode() -> None:
     from main import parse_args
 
     with pytest.raises(SystemExit):
-        parse_args(["auto"])
+        parse_args([])
 
 
-def test_parse_args_auto_full() -> None:
+def test_parse_args_mutex() -> None:
     from main import parse_args
 
-    args = parse_args(["auto", "--check", "go test ./...", "--rounds", "3"])
-    assert args.cmd == "auto"
-    assert args.dir == "."
-    assert args.check == "go test ./..."
-    assert args.rounds == 3
+    with pytest.raises(SystemExit):
+        parse_args(["--to", "1.22", "--auto", "go test"])

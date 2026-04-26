@@ -16,32 +16,28 @@ why might you want to downgrade your go version? just read https://blog.howardjo
 
 ## usage
 
-two subcommands: `change` (pin to a specific version) and `auto` (find lowest version that still passes a check command).
+one of `--to <version>` or `--auto "<cmd>"` is required (mutually exclusive).
 
 ```sh
 # pin go directive to 1.24 in current dir
-go run github.com/lczyk/change-go-version@latest change 1.24
+go run github.com/lczyk/change-go-version@latest --to 1.24
 
 # pin in some other dir
-go run github.com/lczyk/change-go-version@latest change 1.24 --dir path/to/module
+go run github.com/lczyk/change-go-version@latest --to 1.24 --dir path/to/module
 
 # walk down from current go directive; apply lowest version where tests pass
-go run github.com/lczyk/change-go-version@latest auto --check "go test ./..."
+go run github.com/lczyk/change-go-version@latest --auto "go test ./..."
 ```
 
 ## flags
 
 ```
-change [target] [--dir D] [--rounds N] [-j N] [--no-tidy]
-  target            Target Go version (default: 1.24)
+  --to <version>    Target Go version, e.g. 1.22
+  --auto <cmd>      Verification command run via /bin/sh -c
   -d, --dir         Module directory containing go.mod (default: .)
   --rounds          Max indirect-fixup rounds (default: 5)
   -j, --jobs        Parallel version probes (default: 8)
   --no-tidy         Skip the final `go mod tidy`
-
-auto --check "<cmd>" [--dir D] [--rounds N] [-j N] [--no-tidy]
-  --check           Verification command run via /bin/sh -c. Required.
-  ... shared flags as above
 ```
 
 ## auto mode

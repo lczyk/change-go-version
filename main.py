@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
@@ -146,34 +146,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_change = sub.add_parser("change", help="Set go directive to a specific target")
-    p_change.add_argument(
-        "target", nargs="?", default="1.24", help="Target Go version (default: 1.24)"
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--to", help="Target Go version, e.g. 1.22")
+    mode.add_argument(
+        "--auto",
+        help="Verification command run via shell; finds lowest passing version",
     )
-    p_change.add_argument(
+    parser.add_argument(
         "-d", "--dir", default=".", help="Module directory containing go.mod (default: .)"
     )
-    p_change.add_argument("--rounds", type=int, default=5)
-    p_change.add_argument("-j", "--jobs", type=int, default=8)
-    p_change.add_argument("--no-tidy", action="store_true")
-
-    p_auto = sub.add_parser(
-        "auto",
-        help="Walk go directive down per minor; apply lowest version where --check passes",
-    )
-    p_auto.add_argument(
-        "-d", "--dir", default=".", help="Module directory containing go.mod (default: .)"
-    )
-    p_auto.add_argument(
-        "--check",
-        required=True,
-        help="Verification command, e.g. 'go test ./...'",
-    )
-    p_auto.add_argument("--rounds", type=int, default=5)
-    p_auto.add_argument("-j", "--jobs", type=int, default=8)
-    p_auto.add_argument("--no-tidy", action="store_true")
+    parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("-j", "--jobs", type=int, default=8)
+    parser.add_argument("--no-tidy", action="store_true")
 
     return parser.parse_args(argv)
 
@@ -294,10 +278,10 @@ def main() -> None:
         sys.exit(1)
     snapshot = backup_modfiles()
     try:
-        if args.cmd == "change":
-            run_change(args.target, args.rounds, args.jobs, args.no_tidy)
-        elif args.cmd == "auto":
-            run_auto(args.check, args.rounds, args.jobs, args.no_tidy)
+        if args.to is not None:
+            run_change(args.to, args.rounds, args.jobs, args.no_tidy)
+        else:
+            run_auto(args.auto, args.rounds, args.jobs, args.no_tidy)
     except KeyboardInterrupt:
         logging.error("Interrupted; restoring go.mod and go.sum")
         restore_modfiles(snapshot)

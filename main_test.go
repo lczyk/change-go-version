@@ -26,8 +26,8 @@ func TestCanonGoVersion(t *testing.T) {
 		{"1.22.3", "v1.22.3"},
 		{"1.22.0", "v1.22.0"},
 		{"go1.22.3", "v1.22.3"},
-		{"1.22rc1", "v1.22.0"},   // pre-release stripped
-		{"1.22-rc1", "v1.22.0"},  // pre-release stripped
+		{"1.22rc1", "v1.22.0"},  // pre-release stripped
+		{"1.22-rc1", "v1.22.0"}, // pre-release stripped
 		{"v1.22.3", "v1.22.3"},
 		{"", "v0.0.0"},
 		{"1", "v1.0.0"},
