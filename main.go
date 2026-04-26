@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	flags "github.com/jessevdk/go-flags"
 	version "github.com/lczyk/version/go"
@@ -366,13 +368,69 @@ func tryVersion(cand string, rounds, jobs int, noTidy bool, baseline snapshot, c
 	return true
 }
 
-// runAuto walks the go directive downwards by minor (1.X), accepting each
-// passing version. On a failing minor, it then walks patches up (1.X.1,
-// 1.X.2, ... up to maxPatch); the first passing patch is accepted and search
-// stops. If no patch passes, the walk continues to the next minor down.
-func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
-	const maxPatch = 20
+// patchCache memoizes latestPatch results per minor.
+var patchCache = struct {
+	sync.Mutex
+	m map[int]int
+}{m: map[int]int{}}
 
+// latestPatch returns the highest released patch Y for "go1.<minor>.Y" from
+// the official Go release feed. Returns 0 if only "go1.<minor>" (no patches)
+// exists, or -1 on fetch/parse failure.
+func latestPatch(minor int) int {
+	patchCache.Lock()
+	defer patchCache.Unlock()
+	if v, ok := patchCache.m[minor]; ok {
+		return v
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://go.dev/dl/?mode=json&include=all")
+	if err != nil {
+		warn("fetch go release list: %v", err)
+		patchCache.m[minor] = -1
+		return -1
+	}
+	defer resp.Body.Close()
+	var rels []struct{ Version string }
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+		warn("parse go release list: %v", err)
+		patchCache.m[minor] = -1
+		return -1
+	}
+	prefix := fmt.Sprintf("go1.%d", minor)
+	best := -1
+	for _, r := range rels {
+		if !strings.HasPrefix(r.Version, prefix) {
+			continue
+		}
+		rest := r.Version[len(prefix):]
+		if rest == "" {
+			if best < 0 {
+				best = 0
+			}
+			continue
+		}
+		if rest[0] != '.' {
+			continue // skip rc/beta of base 1.X
+		}
+		p, err := strconv.Atoi(rest[1:])
+		if err != nil {
+			continue
+		}
+		if p > best {
+			best = p
+		}
+	}
+	patchCache.m[minor] = best
+	return best
+}
+
+// runAuto walks the go directive downwards by minor (1.X), accepting each
+// passing version. On a failing minor, it queries the latest released patch
+// for that minor and walks patches downward (1.X.<latest>, ..., 1.X.1); the
+// first passing patch is accepted and search stops. If no patch passes (or
+// the release list cannot be fetched), the walk continues to the next minor.
+func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
 	initial, err := readLocalGoDirective()
 	if err != nil {
 		return err
@@ -393,8 +451,13 @@ outer:
 			lastGoodSnap = backupModFiles()
 			continue
 		}
-		info("Auto: 1.%d.0 failed; walking patches up to 1.%d.%d", x, x, maxPatch)
-		for y := 1; y <= maxPatch; y++ {
+		maxP := latestPatch(x)
+		if maxP <= 0 {
+			info("Auto: 1.%d.0 failed; no released patches to try", x)
+			continue
+		}
+		info("Auto: 1.%d.0 failed; walking patches down from 1.%d.%d", x, x, maxP)
+		for y := maxP; y >= 1; y-- {
 			patchCand := fmt.Sprintf("1.%d.%d", x, y)
 			if tryVersion(patchCand, rounds, jobs, noTidy, baseline, checkCmd) {
 				lastGood = patchCand
