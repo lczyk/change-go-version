@@ -4,6 +4,7 @@ go 1.21.0
 
 require (
 	github.com/jessevdk/go-flags v1.6.1
+	github.com/lczyk/assert v0.3.1
 	golang.org/x/mod v0.20.0
 )
 

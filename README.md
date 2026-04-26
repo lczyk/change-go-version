@@ -79,7 +79,7 @@ we do **NOT** run go tests after we change the version so you will need to still
 
 - `go mod tidy -go=X` -- errors on conflicts, doesn't cascade-downgrade
 - `go get -u ./...` -- upgrades everything to latest, can raise the `go`
-  directive past your target.
+  directive past your target
 - [`marwan-at-work/mod`](https://github.com/marwan-at-work/mod) -- focus on upgrades, not pinning to a Go version
 - [`oligot/go-mod-upgrade`](https://github.com/oligot/go-mod-upgrade) -- also focused on upgrades
 

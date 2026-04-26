@@ -407,12 +407,13 @@ outer:
 }
 
 type options struct {
-	To     string `long:"to" description:"target Go version, e.g. 1.22 (mutually exclusive with --auto)"`
-	Auto   string `long:"auto" description:"verification command run via /bin/sh -c; finds lowest passing version (mutually exclusive with --to)"`
-	Dir    string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
-	Rounds int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
-	Jobs   int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
-	NoTidy bool   `long:"no-tidy" description:"skip the final go mod tidy"`
+	To      string `long:"to" description:"target Go version, e.g. 1.22 (mutually exclusive with --auto)"`
+	Auto    string `long:"auto" description:"verification command run via /bin/sh -c; finds lowest passing version (mutually exclusive with --to)"`
+	Dir     string `short:"d" long:"dir" default:"." description:"module directory containing go.mod"`
+	Rounds  int    `long:"rounds" default:"5" description:"max indirect-fixup rounds"`
+	Jobs    int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
+	NoTidy  bool   `long:"no-tidy" description:"skip the final go mod tidy"`
+	Version bool   `long:"version" description:"print version and exit"`
 }
 
 func inDir(dir string, fn func() error) error {
@@ -435,6 +436,15 @@ func main() {
 			os.Exit(0)
 		}
 		os.Exit(1)
+	}
+
+	if opts.Version {
+		shortSHA := CommitSHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		fmt.Printf("change-go-version %s (%s, %s, %s)\n", Version, shortSHA, BuildDate, BuildInfo)
+		return
 	}
 
 	if (opts.To == "") == (opts.Auto == "") {

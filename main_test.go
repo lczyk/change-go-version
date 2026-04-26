@@ -4,17 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/lczyk/assert"
 )
 
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 	prev, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
+	assert.NoError(t, os.Chdir(dir))
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 }
 
@@ -26,17 +24,15 @@ func TestCanonGoVersion(t *testing.T) {
 		{"1.22.3", "v1.22.3"},
 		{"1.22.0", "v1.22.0"},
 		{"go1.22.3", "v1.22.3"},
-		{"1.22rc1", "v1.22.0"},  // pre-release stripped
-		{"1.22-rc1", "v1.22.0"}, // pre-release stripped
+		{"1.22rc1", "v1.22.0"},
+		{"1.22-rc1", "v1.22.0"},
 		{"v1.22.3", "v1.22.3"},
 		{"", "v0.0.0"},
 		{"1", "v1.0.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			if got := canonGoVersion(tc.in); got != tc.want {
-				t.Errorf("canonGoVersion(%q) = %q, want %q", tc.in, got, tc.want)
-			}
+			assert.Equal(t, canonGoVersion(tc.in), tc.want)
 		})
 	}
 }
@@ -53,73 +49,45 @@ func TestCompareGo(t *testing.T) {
 		{"2.0", "1.99.99", 1},
 		{"1.22.3", "1.22.3", 0},
 		{"go1.22", "1.22.0", 0},
-		{"1.22rc1", "1.22", 0}, // rc dropped, equals release
+		{"1.22rc1", "1.22", 0},
 	}
 	for _, tc := range cases {
-		if got := compareGo(tc.a, tc.b); got != tc.want {
-			t.Errorf("compareGo(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
-		}
+		assert.Equal(t, compareGo(tc.a, tc.b), tc.want)
 	}
 }
 
 func TestSet(t *testing.T) {
 	s := set{}
-	if s.has("a") {
-		t.Fatal("empty set should not contain 'a'")
-	}
+	assert.That(t, !s.has("a"), "empty set should not contain 'a'")
 	s.add("b")
 	s.add("a")
 	s.add("c")
 	s.add("a") // dup
-	if !s.has("a") || !s.has("b") || !s.has("c") {
-		t.Fatal("missing keys after add")
-	}
-	if len(s) != 3 {
-		t.Errorf("len = %d, want 3", len(s))
-	}
-	got := s.sorted()
-	want := []string{"a", "b", "c"}
-	if len(got) != len(want) {
-		t.Fatalf("sorted len = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("sorted[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
+	assert.That(t, s.has("a") && s.has("b") && s.has("c"), "missing keys after add")
+	assert.Len(t, s, 3)
+	assert.EqualArrays(t, s.sorted(), []string{"a", "b", "c"})
 }
 
 func TestSnapshotBackupRestore(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
 
-	if err := os.WriteFile("go.mod", []byte("module x\ngo 1.22\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\ngo 1.22\n"), 0o644))
 	// no go.sum
 
 	snap := backupModFiles()
 
-	// Mutate / create after snapshot.
-	if err := os.WriteFile("go.mod", []byte("module x\ngo 1.99\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile("go.sum", []byte("garbage\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\ngo 1.99\n"), 0o644))
+	assert.NoError(t, os.WriteFile("go.sum", []byte("garbage\n"), 0o644))
 
 	snap.restore()
 
 	got, err := os.ReadFile("go.mod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "module x\ngo 1.22\n" {
-		t.Errorf("go.mod not restored: %q", got)
-	}
-	if _, err := os.Stat("go.sum"); !os.IsNotExist(err) {
-		t.Errorf("go.sum should have been deleted, stat err: %v", err)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, string(got), "module x\ngo 1.22\n")
+
+	_, err = os.Stat("go.sum")
+	assert.That(t, os.IsNotExist(err), "go.sum should have been deleted")
 }
 
 func TestMinorOf(t *testing.T) {
@@ -134,47 +102,32 @@ func TestMinorOf(t *testing.T) {
 		{"v1", 0},
 	}
 	for _, tc := range cases {
-		if got := minorOf(tc.in); got != tc.want {
-			t.Errorf("minorOf(%q) = %d, want %d", tc.in, got, tc.want)
-		}
+		assert.Equal(t, minorOf(tc.in), tc.want)
 	}
 }
 
 func TestReadLocalGoDirective(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
-	if err := os.WriteFile("go.mod", []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.22\n"), 0o644))
 	got, err := readLocalGoDirective()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "1.22" {
-		t.Errorf("got %q, want %q", got, "1.22")
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, got, "1.22")
 }
 
 func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
 
-	// neither file exists
 	snap := backupModFiles()
 
-	// Create both, then restore should remove them.
-	if err := os.WriteFile("go.mod", []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile("go.sum", []byte("y"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, os.WriteFile("go.mod", []byte("x"), 0o644))
+	assert.NoError(t, os.WriteFile("go.sum", []byte("y"), 0o644))
 
 	snap.restore()
 
 	for _, p := range []string{"go.mod", "go.sum"} {
-		if _, err := os.Stat(filepath.Join(dir, p)); !os.IsNotExist(err) {
-			t.Errorf("%s should not exist after restore, err: %v", p, err)
-		}
+		_, err := os.Stat(filepath.Join(dir, p))
+		assert.That(t, os.IsNotExist(err), p+" should not exist after restore")
 	}
 }
