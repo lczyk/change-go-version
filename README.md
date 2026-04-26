@@ -1,6 +1,10 @@
 # change-go-version
 
-set a Go module's `go` directive to a target version, then move every dependency to the highest version whose own `go.mod` declares `go <= TARGET`.
+![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/lczyk/change-go-version)
+![GitHub Tag](https://img.shields.io/github/v/tag/lczyk/change-go-version?label=release)
+[![lint_and_test](https://github.com/lczyk/change-go-version/actions/workflows/lint_and_test.yml/badge.svg)](https://github.com/lczyk/change-go-version/actions/workflows/lint_and_test.yml)
+
+set `go` directive to a target version, then move every dependency to the highest version whose own `go.mod` declares `go <= TARGET`.
 
 this works in both directions -- downgrade your `go` directive and the script walks deps backwards to compatible versions; raise it and the script bumps deps forward up to the new ceiling.
 

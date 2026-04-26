@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.0.5"
+__version__ = "0.0.6"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
@@ -153,7 +153,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Verification command run via shell; finds lowest passing version",
     )
     parser.add_argument(
-        "-d", "--dir", default=".", help="Module directory containing go.mod (default: .)"
+        "-d",
+        "--dir",
+        default=".",
+        help="Module directory containing go.mod (default: .)",
     )
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("-j", "--jobs", type=int, default=8)
