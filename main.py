@@ -11,12 +11,13 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "lczyk"
 
 GoVersion = tuple[int, int, int]
@@ -311,15 +312,24 @@ def main() -> None:
         logging.error("no go.mod in %s", args.dir)
         sys.exit(1)
     snapshot = backup_modfiles()
+
+    # Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
+    # and go.sum exactly as we found them. Without this, killing a long
+    # --auto mid-iteration leaves the working tree at whatever candidate
+    # was being probed.
+    def _on_signal(signum: int, _frame: object) -> None:
+        logging.error("Interrupted (%s); restoring go.mod and go.sum", signum)
+        restore_modfiles(snapshot)
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
     try:
         if args.to is not None:
             run_change(args.to, args.rounds, args.jobs, args.no_tidy)
         else:
             run_auto(args.auto, args.rounds, args.jobs, args.no_tidy)
-    except KeyboardInterrupt:
-        logging.error("Interrupted; restoring go.mod and go.sum")
-        restore_modfiles(snapshot)
-        os._exit(130)
     except (RuntimeError, subprocess.CalledProcessError) as e:
         msg = e if isinstance(e, RuntimeError) else f"command failed: {' '.join(e.cmd)}"
         logging.error("%s", msg)

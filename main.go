@@ -12,16 +12,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	flags "github.com/jessevdk/go-flags"
+	version "github.com/lczyk/version/go"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
-	version "github.com/lczyk/version/go"
 )
 
 //go:embed VERSION
@@ -421,16 +423,6 @@ type options struct {
 	Version bool   `long:"version" description:"print version and exit"`
 }
 
-func inDir(dir string, fn func() error) error {
-	if err := os.Chdir(dir); err != nil {
-		return fmt.Errorf("chdir %s: %w", dir, err)
-	}
-	if _, err := os.Stat("go.mod"); err != nil {
-		return fmt.Errorf("no go.mod in %s", dir)
-	}
-	return fn()
-}
-
 func main() {
 	var opts options
 	parser := flags.NewParser(&opts, flags.Default)
@@ -453,23 +445,40 @@ func main() {
 		os.Exit(2)
 	}
 
-	err := inDir(opts.Dir, func() error {
-		snap := backupModFiles()
-		var runErr error
-		if opts.To != "" {
-			runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
-		} else {
-			runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
-		}
-		if runErr != nil {
-			errlog("%v", runErr)
-			errlog("Restoring go.mod and go.sum to original state")
-			snap.restore()
-			return runErr
-		}
-		return nil
-	})
-	if err != nil {
+	if err := os.Chdir(opts.Dir); err != nil {
+		errlog("chdir %s: %v", opts.Dir, err)
+		os.Exit(1)
+	}
+	if _, err := os.Stat("go.mod"); err != nil {
+		errlog("no go.mod in %s", opts.Dir)
+		os.Exit(1)
+	}
+
+	snap := backupModFiles()
+
+	// Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
+	// and go.sum exactly as we found them. Without this, killing a long
+	// `--auto` mid-iteration leaves the working tree at whatever candidate
+	// was being probed.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		errlog("Interrupted (%s); restoring go.mod and go.sum", sig)
+		snap.restore()
+		os.Exit(130)
+	}()
+
+	var runErr error
+	if opts.To != "" {
+		runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
+	} else {
+		runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
+	}
+	if runErr != nil {
+		errlog("%v", runErr)
+		errlog("Restoring go.mod and go.sum to original state")
+		snap.restore()
 		os.Exit(1)
 	}
 }
