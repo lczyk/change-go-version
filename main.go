@@ -342,10 +342,30 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 	return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
 }
 
-// runAuto walks the go directive downwards (one minor at a time) to find the
-// lowest version where checkCmd still exits 0. The lowest passing version is
-// applied at the end; on no improvement, baseline is restored.
+// tryVersion restores baseline, applies cand via runChange, then runs checkCmd.
+// Returns true iff both steps succeed.
+func tryVersion(cand string, rounds, jobs int, noTidy bool, baseline snapshot, checkCmd string) bool {
+	baseline.restore()
+	info("Auto: trying go %s ...", cand)
+	if err := runChange(cand, rounds, jobs, noTidy); err != nil {
+		warn("Auto: change to %s failed: %v", cand, err)
+		return false
+	}
+	if err := runCheck(checkCmd); err != nil {
+		warn("Auto: check failed at go %s", cand)
+		return false
+	}
+	info("Auto: go %s passed", cand)
+	return true
+}
+
+// runAuto walks the go directive downwards by minor (1.X), accepting each
+// passing version. On a failing minor, it then walks patches up (1.X.1,
+// 1.X.2, ... up to maxPatch); the first passing patch is accepted and search
+// stops. If no patch passes, the walk continues to the next minor down.
 func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
+	const maxPatch = 20
+
 	initial, err := readLocalGoDirective()
 	if err != nil {
 		return err
@@ -358,21 +378,23 @@ func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) 
 	startMinor := minorOf(canonGoVersion(initial))
 	lastGood := initial
 	lastGoodSnap := baseline
+outer:
 	for x := startMinor - 1; x >= 0; x-- {
 		cand := fmt.Sprintf("1.%d", x)
-		info("Auto: trying go %s ...", cand)
-		baseline.restore()
-		if err := runChange(cand, rounds, jobs, noTidy); err != nil {
-			warn("Auto: change to %s failed: %v", cand, err)
-			break
+		if tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
+			lastGood = cand
+			lastGoodSnap = backupModFiles()
+			continue
 		}
-		if err := runCheck(checkCmd); err != nil {
-			warn("Auto: check failed at go %s", cand)
-			break
+		info("Auto: 1.%d.0 failed; walking patches up to 1.%d.%d", x, x, maxPatch)
+		for y := 1; y <= maxPatch; y++ {
+			patchCand := fmt.Sprintf("1.%d.%d", x, y)
+			if tryVersion(patchCand, rounds, jobs, noTidy, baseline, checkCmd) {
+				lastGood = patchCand
+				lastGoodSnap = backupModFiles()
+				break outer
+			}
 		}
-		info("Auto: go %s passed", cand)
-		lastGood = cand
-		lastGoodSnap = backupModFiles()
 	}
 
 	lastGoodSnap.restore()
@@ -407,7 +429,7 @@ func main() {
 	var opts options
 	parser := flags.NewParser(&opts, flags.Default)
 	parser.Name = "change-go-version"
-	parser.LongDescription = "Move a Go module's go directive (and deps) to a target version, or find the lowest passing version automatically. See https://github.com/lczyk/change-go-version"
+	parser.LongDescription = "Move a Go module's go directive (and deps) to a target version, or find the lowest passing version automatically."
 	if _, err := parser.Parse(); err != nil {
 		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
 			os.Exit(0)

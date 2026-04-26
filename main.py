@@ -220,7 +220,34 @@ def run_check(cmd: str) -> bool:
     return subprocess.run(cmd, shell=True).returncode == 0
 
 
+def try_version(
+    cand: str,
+    rounds: int,
+    jobs: int,
+    no_tidy: bool,
+    baseline: dict[Path, bytes | None],
+    check_cmd: str,
+) -> bool:
+    """Restore baseline, apply cand via run_change, then run check_cmd. True iff both pass."""
+    restore_modfiles(baseline)
+    logging.info("Auto: trying go %s ...", cand)
+    try:
+        run_change(cand, rounds, jobs, no_tidy)
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        logging.warning("Auto: change to %s failed: %s", cand, e)
+        return False
+    if not run_check(check_cmd):
+        logging.warning("Auto: check failed at go %s", cand)
+        return False
+    logging.info("Auto: go %s passed", cand)
+    return True
+
+
 def run_auto(check_cmd: str, rounds: int, jobs: int, no_tidy: bool) -> None:
+    """Walk minors down. On a failing minor, walk patches up (first hit wins,
+    search stops). If no patch passes, continue to next minor down."""
+    MAX_PATCH = 20
+
     initial = read_local_go_directive()
     logging.info("Auto: baseline go %s; verifying check command...", initial)
     if not run_check(check_cmd):
@@ -231,19 +258,23 @@ def run_auto(check_cmd: str, rounds: int, jobs: int, no_tidy: bool) -> None:
     last_good_snap = baseline
     for x in range(minor_of(initial) - 1, -1, -1):
         cand = f"1.{x}"
-        logging.info("Auto: trying go %s ...", cand)
-        restore_modfiles(baseline)
-        try:
-            run_change(cand, rounds, jobs, no_tidy)
-        except (RuntimeError, subprocess.CalledProcessError) as e:
-            logging.warning("Auto: change to %s failed: %s", cand, e)
+        if try_version(cand, rounds, jobs, no_tidy, baseline, check_cmd):
+            last_good = cand
+            last_good_snap = backup_modfiles()
+            continue
+        logging.info(
+            "Auto: 1.%d.0 failed; walking patches up to 1.%d.%d", x, x, MAX_PATCH
+        )
+        found = False
+        for y in range(1, MAX_PATCH + 1):
+            patch_cand = f"1.{x}.{y}"
+            if try_version(patch_cand, rounds, jobs, no_tidy, baseline, check_cmd):
+                last_good = patch_cand
+                last_good_snap = backup_modfiles()
+                found = True
+                break
+        if found:
             break
-        if not run_check(check_cmd):
-            logging.warning("Auto: check failed at go %s", cand)
-            break
-        logging.info("Auto: go %s passed", cand)
-        last_good = cand
-        last_good_snap = backup_modfiles()
 
     restore_modfiles(last_good_snap)
     if norm(last_good) == norm(initial):
