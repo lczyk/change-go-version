@@ -8,13 +8,14 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,76 +28,77 @@ const (
 	colReset  = "\033[0m"
 )
 
-func info(format string, a ...any)  { fmt.Fprintf(os.Stderr, colGreen+"INFO"+colReset+": "+format+"\n", a...) }
-func warn(format string, a ...any)  { fmt.Fprintf(os.Stderr, colYellow+"WARNING"+colReset+": "+format+"\n", a...) }
-func errlog(format string, a ...any) { fmt.Fprintf(os.Stderr, colRed+"ERROR"+colReset+": "+format+"\n", a...) }
+func info(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, colGreen+"INFO"+colReset+": "+format+"\n", a...)
+}
+func warn(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, colYellow+"WARNING"+colReset+": "+format+"\n", a...)
+}
+func errlog(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, colRed+"ERROR"+colReset+": "+format+"\n", a...)
+}
+
+var (
+	goLineRe   = regexp.MustCompile(`^go\s+(\S+)`)
+	versionSep = regexp.MustCompile(`[.\-]`)
+	digitsRe   = regexp.MustCompile(`\d+`)
+)
 
 type goVersion [3]int
 
-var goLineRe = regexp.MustCompile(`^go\s+(\S+)`)
-
-func norm(v string) goVersion {
-	parts := regexp.MustCompile(`[.\-]`).Split(v, -1)
+func parseVersion(v string) goVersion {
+	parts := versionSep.Split(v, -1)
 	var out goVersion
 	for i := 0; i < 3 && i < len(parts); i++ {
-		m := regexp.MustCompile(`\d+`).FindString(parts[i])
-		if m == "" {
-			continue
+		if m := digitsRe.FindString(parts[i]); m != "" {
+			out[i], _ = strconv.Atoi(m)
 		}
-		n, _ := strconv.Atoi(m)
-		out[i] = n
 	}
 	return out
 }
 
-func cmpVersion(a, b goVersion) int {
+func (a goVersion) Compare(b goVersion) int {
 	for i := range a {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
+		if c := cmp.Compare(a[i], b[i]); c != 0 {
+			return c
 		}
 	}
 	return 0
 }
 
-// run executes a go command with GOTOOLCHAIN=local. Captured by default.
-func run(capture bool, args ...string) (stdout, stderr string, err error) {
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
-	if capture {
-		var so, se strings.Builder
-		cmd.Stdout = &so
-		cmd.Stderr = &se
-		err = cmd.Run()
-		return so.String(), se.String(), err
-	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+func goEnv() []string { return append(os.Environ(), "GOTOOLCHAIN=local") }
+
+// runCapture runs a command and captures stdout/stderr.
+func runCapture(name string, args ...string) (stdout, stderr string, err error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = goEnv()
+	var so, se strings.Builder
+	cmd.Stdout = &so
+	cmd.Stderr = &se
 	err = cmd.Run()
-	return "", "", err
+	return so.String(), se.String(), err
 }
 
-func mustRun(args ...string) {
-	if _, stderr, err := run(true, args...); err != nil {
-		panic(fmt.Errorf("%s failed: %w\n%s", strings.Join(args, " "), err, stderr))
-	}
+// runStream runs a command with stdout/stderr passed through.
+func runStream(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Env = goEnv()
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // declaredGo returns the `go` directive from <mod>@<ver>'s go.mod, or "" on failure.
 func declaredGo(mod, ver string) string {
-	stdout, _, err := run(true, "go", "mod", "download", "-json", mod+"@"+ver)
+	stdout, _, err := runCapture("go", "mod", "download", "-json", mod+"@"+ver)
 	if err != nil || stdout == "" {
 		return ""
 	}
-	var info struct {
-		GoMod string
-	}
-	if json.Unmarshal([]byte(stdout), &info) != nil || info.GoMod == "" {
+	var meta struct{ GoMod string }
+	if err := json.Unmarshal([]byte(stdout), &meta); err != nil || meta.GoMod == "" {
 		return ""
 	}
-	f, err := os.Open(info.GoMod)
+	f, err := os.Open(meta.GoMod)
 	if err != nil {
 		return ""
 	}
@@ -112,7 +114,7 @@ func declaredGo(mod, ver string) string {
 
 // listVersions returns versions newest-first.
 func listVersions(mod string) []string {
-	stdout, _, err := run(true, "go", "list", "-m", "-versions", mod)
+	stdout, _, err := runCapture("go", "list", "-m", "-versions", mod)
 	if err != nil {
 		return nil
 	}
@@ -121,19 +123,17 @@ func listVersions(mod string) []string {
 		return nil
 	}
 	vs := fields[1:]
-	for i, j := 0, len(vs)-1; i < j; i, j = i+1, j-1 {
-		vs[i], vs[j] = vs[j], vs[i]
-	}
+	slices.Reverse(vs)
 	return vs
 }
 
-func pickVersion(mod string, target goVersion) (ver, gv string, ok bool) {
+func pickVersion(mod string, target goVersion) (ver, declared string, ok bool) {
 	for _, v := range listVersions(mod) {
 		gv := declaredGo(mod, v)
 		if gv == "" {
 			continue
 		}
-		if cmpVersion(norm(gv), target) <= 0 {
+		if parseVersion(gv).Compare(target) <= 0 {
 			return v, gv, true
 		}
 	}
@@ -144,7 +144,7 @@ type modRow struct{ Path, Version, GoVersion string }
 
 func listModules(directOnly bool) []modRow {
 	const fmtTpl = "{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.GoVersion}}\t{{.Indirect}}{{end}}"
-	stdout, _, _ := run(true, "go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
+	stdout, _, _ := runCapture("go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
 	var rows []modRow
 	for _, line := range strings.Split(stdout, "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -162,15 +162,29 @@ func listModules(directOnly bool) []modRow {
 	return rows
 }
 
+type set map[string]struct{}
+
+func (s set) add(k string)      { s[k] = struct{}{} }
+func (s set) has(k string) bool { _, ok := s[k]; return ok }
+func (s set) sorted() []string {
+	out := make([]string, 0, len(s))
+	for k := range s {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // pinBatch probes versions for each mod in parallel, then `go get`s them serially.
-// Returns the set of mods for which no compatible version exists.
-func pinBatch(mods []string, target goVersion, label string, jobs int) map[string]bool {
+// Returns mods for which no compatible version exists.
+func pinBatch(mods []string, target goVersion, label string, jobs int) set {
 	type result struct {
 		mod, ver, gv string
 		ok           bool
 	}
 	results := make([]result, len(mods))
-	sem := make(chan struct{}, max(1, min(jobs, len(mods))))
+	limit := max(1, min(jobs, len(mods)))
+	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for i, m := range mods {
 		wg.Add(1)
@@ -184,15 +198,15 @@ func pinBatch(mods []string, target goVersion, label string, jobs int) map[strin
 	}
 	wg.Wait()
 
-	unresolvable := map[string]bool{}
+	unresolvable := set{}
 	for _, r := range results {
 		if !r.ok {
 			warn("no compatible version for %s", r.mod)
-			unresolvable[r.mod] = true
+			unresolvable.add(r.mod)
 			continue
 		}
 		info("%s%s -> %s  (declares go %s)", label, r.mod, r.ver, r.gv)
-		if _, stderr, err := run(true, "go", "get", r.mod+"@"+r.ver); err != nil {
+		if _, stderr, err := runCapture("go", "get", r.mod+"@"+r.ver); err != nil {
 			lines := strings.Split(strings.TrimSpace(stderr), "\n")
 			warn("go get failed for %s: %s", r.mod, lines[len(lines)-1])
 		}
@@ -200,79 +214,74 @@ func pinBatch(mods []string, target goVersion, label string, jobs int) map[strin
 	return unresolvable
 }
 
-type snapshot map[string][]byte
+type snapshot struct {
+	files map[string][]byte // nil value = file did not exist
+}
 
 func backupModFiles() snapshot {
-	s := snapshot{}
+	s := snapshot{files: map[string][]byte{}}
 	for _, p := range []string{"go.mod", "go.sum"} {
-		if data, err := os.ReadFile(p); err == nil {
-			s[p] = data
-		} else {
-			s[p] = nil // marker: didn't exist
+		data, err := os.ReadFile(p)
+		if err != nil {
+			s.files[p] = nil
+			continue
 		}
+		s.files[p] = data
 	}
 	return s
 }
 
-func restoreModFiles(s snapshot) {
-	for p, data := range s {
+func (s snapshot) restore() {
+	for p, data := range s.files {
 		if data == nil {
 			os.Remove(p)
-		} else {
-			_ = os.WriteFile(p, data, 0o644)
+			continue
 		}
+		_ = os.WriteFile(p, data, 0o644)
 	}
 }
 
-func runMain(target string, rounds, jobs int, noTidy bool) error {
-	tgt := norm(target)
+func run(target string, rounds, jobs int, noTidy bool) error {
+	tgt := parseVersion(target)
 	canonical := fmt.Sprintf("%d.%d.%d", tgt[0], tgt[1], tgt[2])
 
-	mustRun("go", "mod", "edit", "-go="+target, "-toolchain=none")
+	if _, stderr, err := runCapture("go", "mod", "edit", "-go="+target, "-toolchain=none"); err != nil {
+		return fmt.Errorf("go mod edit: %w\n%s", err, stderr)
+	}
 
 	info("Pinning direct deps to highest version with go <= %s", canonical)
-	var direct []string
+	direct := make([]string, 0)
 	for _, r := range listModules(true) {
 		direct = append(direct, r.Path)
 	}
-	if unresolvable := pinBatch(direct, tgt, "", jobs); len(unresolvable) > 0 {
-		names := make([]string, 0, len(unresolvable))
-		for m := range unresolvable {
-			names = append(names, m)
-		}
-		sort.Strings(names)
-		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s", canonical, strings.Join(names, ", "))
+	if bad := pinBatch(direct, tgt, "", jobs); len(bad) > 0 {
+		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s",
+			canonical, strings.Join(bad.sorted(), ", "))
 	}
 
-	skip := map[string]bool{}
-	converged := false
+	skip := set{}
 	for n := 1; n <= rounds; n++ {
 		var offenders []string
 		for _, r := range listModules(false) {
-			if r.GoVersion != "" && cmpVersion(norm(r.GoVersion), tgt) > 0 && !skip[r.Path] {
+			if r.GoVersion != "" && parseVersion(r.GoVersion).Compare(tgt) > 0 && !skip.has(r.Path) {
 				offenders = append(offenders, r.Path)
 			}
 		}
 		if len(offenders) == 0 {
-			converged = true
-			break
+			if !noTidy {
+				if err := runStream("go", "mod", "tidy", "-go="+canonical); err != nil {
+					return fmt.Errorf("go mod tidy: %w", err)
+				}
+			}
+			info("Done. go directive: %s", canonical)
+			return nil
 		}
 		info("Round %d: %d offending indirect(s)", n, len(offenders))
 		for m := range pinBatch(offenders, tgt, fmt.Sprintf("[round %d] ", n), jobs) {
-			skip[m] = true
+			skip.add(m)
 		}
 	}
-	if !converged {
-		return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
-	}
-
-	if !noTidy {
-		if _, _, err := run(false, "go", "mod", "tidy", "-go="+canonical); err != nil {
-			return fmt.Errorf("go mod tidy: %w", err)
-		}
-	}
-	info("Done. go directive: %s", canonical)
-	return nil
+	return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
 }
 
 func main() {
@@ -280,31 +289,35 @@ func main() {
 	jobs := flag.Int("j", 8, "Parallel version probes")
 	noTidy := flag.Bool("no-tidy", false, "Skip the final `go mod tidy`")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: change-go-version [flags] [target]\n\nSee https://github.com/lczyk/change-go-version")
+		fmt.Fprintln(os.Stderr, "Usage: change-go-version [flags] <dir> [target]\n\nSee https://github.com/lczyk/change-go-version")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
+	if flag.NArg() < 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	dir := flag.Arg(0)
 	target := "1.24"
-	if flag.NArg() > 0 {
-		target = flag.Arg(0)
+	if flag.NArg() > 1 {
+		target = flag.Arg(1)
+	}
+
+	if err := os.Chdir(dir); err != nil {
+		errlog("chdir %s: %v", dir, err)
+		os.Exit(1)
+	}
+	if _, err := os.Stat("go.mod"); err != nil {
+		errlog("no go.mod in %s", dir)
+		os.Exit(1)
 	}
 
 	snap := backupModFiles()
-	defer func() {
-		if r := recover(); r != nil {
-			errlog("%v", r)
-			errlog("Restoring go.mod and go.sum to original state")
-			restoreModFiles(snap)
-			os.Exit(1)
-		}
-	}()
-
-	if err := runMain(target, *rounds, *jobs, *noTidy); err != nil {
+	if err := run(target, *rounds, *jobs, *noTidy); err != nil {
 		errlog("%v", err)
 		errlog("Restoring go.mod and go.sum to original state")
-		restoreModFiles(snap)
+		snap.restore()
 		os.Exit(1)
 	}
 }
-

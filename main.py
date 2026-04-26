@@ -133,6 +133,7 @@ def restore_modfiles(snapshot: dict[Path, bytes | None]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("dir", help="Path to module directory containing go.mod")
     parser.add_argument("target", nargs="?", default="1.24", help="Target Go version (default: 1.24)")
     parser.add_argument("--rounds", type=int, default=5, help="Max indirect-fixup rounds (default: 5)")
     parser.add_argument("-j", "--jobs", type=int, default=8, help="Parallel version probes (default: 8)")
@@ -187,6 +188,14 @@ def main() -> None:
     logging.addLevelName(logging.ERROR, f"{COLORS['red']}ERROR{COLORS['reset']}")
 
     args = parse_args()
+    try:
+        os.chdir(args.dir)
+    except OSError as e:
+        logging.error("chdir %s: %s", args.dir, e)
+        sys.exit(1)
+    if not Path("go.mod").is_file():
+        logging.error("no go.mod in %s", args.dir)
+        sys.exit(1)
     snapshot = backup_modfiles()
     try:
         _main(args)

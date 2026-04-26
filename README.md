@@ -1,82 +1,60 @@
 # change-go-version
 
-Set a Go module's `go` directive to a target version, then move every dependency
-to the highest version whose own `go.mod` declares `go <= TARGET`.
+set a Go module's `go` directive to a target version, then move every dependency to the highest version whose own `go.mod` declares `go <= TARGET`.
 
-Works in **both directions** — downgrade your `go` directive and the script
-walks deps backwards to compatible versions; raise it and the script bumps deps
-forward up to the new ceiling.
+this works in both directions -- downgrade your `go` directive and the script walks deps backwards to compatible versions; raise it and the script bumps deps forward up to the new ceiling.
 
-This fills a gap in the Go toolchain: `go mod tidy -go=X` errors out when any
-selected dep needs a newer Go than X, instead of cascading the downgrade.
-`go get -u ./...` upgrades everything to `@latest` and silently raises your `go`
-directive to whatever those need. Neither does what you usually want when
-pinning to a specific Go version.
+**NOTE**: we we not run the testas after the version change. we *only* change the versions. you then need to run the tests and deal with the fallout yourself.
 
-## Install / Use
+---
 
-No install — run directly:
+this tool fills a gap in the Go toolchain: `go mod tidy -go=X` errors out when any selected dep needs a newer Go than X, instead of cascading the downgrade. `go get -u ./...` upgrades everything to `@latest` and silently raises your `go` directive to whatever those need. neither does what you usually want when pinning to a specific Go version.
 
-```sh
-go run github.com/lczyk/change-go-version@latest 1.24
-```
+## why
 
-Or pin a version:
+why might you want to downgrade your go version? just read https://blog.howardjohn.info/posts/go-mod-version/. tldr: go version if viral. if you are writing a library and set go version to 1.23, your users *CANNOT* use that lib with earlier go version. is that a real or an arbitrary barrier?
+
+## usage
 
 ```sh
-go run github.com/lczyk/change-go-version@v0.1.0 1.24
+go run github.com/lczyk/change-go-version@latest . 1.24
 ```
 
-Run from your module's root (where `go.mod` lives).
+first arg is the path to the module directory (where `go.mod` lives), second is the target Go version.
 
-## Flags
+## flags
 
 ```
-change-go-version [flags] [target]
+change-go-version [flags] <dir> [target]
 
+  dir               Path to module directory containing go.mod (required).
   target            Target Go version (default: 1.24). E.g. 1.21, 1.24, 1.25.
   -rounds int       Max indirect-fixup rounds (default: 5)
   -j int            Parallel version probes (default: 8)
   -no-tidy          Skip the final `go mod tidy`
 ```
 
-## Examples
+## behaviour
 
-Downgrade to 1.23:
-
-```sh
-go run github.com/lczyk/change-go-version@latest 1.23
-```
-
-Upgrade to 1.25 with 16 parallel probes:
-
-```sh
-go run github.com/lczyk/change-go-version@latest -j 16 1.25
-```
-
-## Behaviour
-
-1. Run `go mod edit -go=TARGET -toolchain=none`.
-2. **Pass 1:** for every direct dep, list available versions newest→oldest, find
-   the first whose own `go.mod` declares `go <= TARGET`, pin it via `go get`.
+1. run `go mod edit -go=TARGET -toolchain=none`
+2. **Pass 1:** for every direct dep, list available versions newest→oldest, find the first whose own `go.mod` declares `go <= TARGET`, pin it via `go get`
 3. **Pass 2 (rounds):** scan all modules (incl. indirect) for any whose
-   currently-selected version still declares `go > TARGET`. Pin each down.
-   Repeat until stable or `-rounds` exhausted.
-4. Run `go mod tidy -go=TARGET`.
+   currently-selected version still declares `go > TARGET`. pin each down.
+   repeat until stable or `-rounds` exhausted
+4. run `go mod tidy -go=TARGET`
 
 `GOTOOLCHAIN=local` is set throughout to prevent the Go toolchain from
 auto-bumping the directive behind your back.
 
-## Failure handling
+## failures
 
-The script snapshots `go.mod` and `go.sum` at startup. If anything fails —
+we snapshot `go.mod` and `go.sum` at startup. if anything fails, e.g. 
 unresolvable direct dep, max rounds exhausted, `go mod tidy` errors,
-`Ctrl-C` — both files are restored byte-for-byte before exit.
+`Ctrl-C` — both files are restored before exit.
 
-Common failure: a direct dep has **no** version compatible with your TARGET
-(e.g. its earliest release already requires a newer Go). The script reports
-which deps and exits non-zero with `go.mod` untouched. You then either pick
-a higher TARGET, or fork/replace the offending dep.
+a common failure is that a direct dep has **no** version compatible with your TARGET (e.g. its earliest release already requires a newer Go). The script reports which deps and exits non-zero with `go.mod` untouched. You then either pick a higher TARGET, or fork/replace the offending dep.
+
+we do **NOT** run go tests after we change the version so you will need to still check all works after the version change.
 
 ## Requirements
 
