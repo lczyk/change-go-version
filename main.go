@@ -12,16 +12,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	flags "github.com/jessevdk/go-flags"
+	version "github.com/lczyk/version/go"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
-	version "github.com/lczyk/version/go"
 )
 
 //go:embed VERSION
@@ -347,6 +351,54 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 	return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
 }
 
+// toolchainVerRe extracts the Go version embedded in a `golang.org/toolchain`
+// module version string like "v0.0.1-go1.22.5.linux-amd64".
+var toolchainVerRe = regexp.MustCompile(`^v0\.0\.1-go1\.(\d+)(?:\.(\d+))?`)
+
+// fetchPatchesByMinor returns a map from minor (X in 1.X.Y) to the descending
+// list of patch numbers (Y) actually released for that minor, with 0 excluded
+// (since 1.X.0 == 1.X has already been probed by the caller). Pre-release
+// suffixes (rc/beta) are ignored.
+//
+// Source: `go list -m -versions golang.org/toolchain`. The toolchain module
+// has one version per (release × OS × arch), so the same go release shows up
+// many times — we dedupe.
+func fetchPatchesByMinor() (map[int][]int, error) {
+	stdout, stderr, err := runCapture("go", "list", "-m", "-versions", "golang.org/toolchain")
+	if err != nil {
+		return nil, fmt.Errorf("go list -m -versions golang.org/toolchain: %w\n%s", err, stderr)
+	}
+	out := map[int]map[int]struct{}{}
+	for _, v := range strings.Fields(strings.TrimSpace(stdout)) {
+		m := toolchainVerRe.FindStringSubmatch(v)
+		if m == nil {
+			continue
+		}
+		x, _ := strconv.Atoi(m[1])
+		y := 0
+		if m[2] != "" {
+			y, _ = strconv.Atoi(m[2])
+		}
+		if y == 0 {
+			continue // 1.X.0 == 1.X already probed
+		}
+		if out[x] == nil {
+			out[x] = map[int]struct{}{}
+		}
+		out[x][y] = struct{}{}
+	}
+	result := map[int][]int{}
+	for x, ys := range out {
+		list := make([]int, 0, len(ys))
+		for y := range ys {
+			list = append(list, y)
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(list)))
+		result[x] = list
+	}
+	return result, nil
+}
+
 // tryVersion restores baseline, applies cand via runChange, then runs checkCmd.
 // Returns true iff both steps succeed.
 func tryVersion(cand string, rounds, jobs int, noTidy bool, baseline snapshot, checkCmd string) bool {
@@ -365,12 +417,14 @@ func tryVersion(cand string, rounds, jobs int, noTidy bool, baseline snapshot, c
 }
 
 // runAuto walks the go directive downwards by minor (1.X), accepting each
-// passing version. On a failing minor, it then walks patches up (1.X.1,
-// 1.X.2, ... up to maxPatch); the first passing patch is accepted and search
-// stops. If no patch passes, the walk continues to the next minor down.
+// passing version. On a failing minor (1.X = 1.X.0), it probes the highest
+// known patch for that minor first — failures most often live at minor
+// boundaries, so the highest patch is the most likely to clear them. If that
+// fails, no patch in this minor is likely to pass; continue to the next minor
+// down. If it passes, walk patches *down* from there (over the actually
+// released patches, not a contiguous range) to find the lowest passing one,
+// then stop the overall search. Patch numbers come from go.dev/dl.
 func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
-	const maxPatch = 20
-
 	initial, err := readLocalGoDirective()
 	if err != nil {
 		return err
@@ -378,6 +432,12 @@ func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) 
 	info("Auto: baseline go %s; verifying check command...", initial)
 	if err := runCheck(checkCmd); err != nil {
 		return fmt.Errorf("baseline check failed at go %s: %w", initial, err)
+	}
+
+	patchesByMinor, err := fetchPatchesByMinor()
+	if err != nil {
+		warn("Auto: could not fetch Go release list (%v); patch walk disabled", err)
+		patchesByMinor = map[int][]int{}
 	}
 
 	startMinor := minorOf(canonGoVersion(initial))
@@ -391,15 +451,28 @@ outer:
 			lastGoodSnap = backupModFiles()
 			continue
 		}
-		info("Auto: 1.%d.0 failed; walking patches up to 1.%d.%d", x, x, maxPatch)
-		for y := 1; y <= maxPatch; y++ {
-			patchCand := fmt.Sprintf("1.%d.%d", x, y)
-			if tryVersion(patchCand, rounds, jobs, noTidy, baseline, checkCmd) {
-				lastGood = patchCand
-				lastGoodSnap = backupModFiles()
-				break outer
-			}
+		patches := patchesByMinor[x]
+		if len(patches) == 0 {
+			continue // no patches known (or fetch failed) — move on
 		}
+		topY := patches[0]
+		info("Auto: 1.%d.0 failed; probing top patch 1.%d.%d first", x, x, topY)
+		topCand := fmt.Sprintf("1.%d.%d", x, topY)
+		if !tryVersion(topCand, rounds, jobs, noTidy, baseline, checkCmd) {
+			continue
+		}
+		lastGood = topCand
+		lastGoodSnap = backupModFiles()
+		info("Auto: 1.%d.%d passed; walking patches down for lowest passing", x, topY)
+		for _, y := range patches[1:] {
+			patchCand := fmt.Sprintf("1.%d.%d", x, y)
+			if !tryVersion(patchCand, rounds, jobs, noTidy, baseline, checkCmd) {
+				break
+			}
+			lastGood = patchCand
+			lastGoodSnap = backupModFiles()
+		}
+		break outer
 	}
 
 	lastGoodSnap.restore()
@@ -419,16 +492,6 @@ type options struct {
 	Jobs    int    `short:"j" long:"jobs" default:"8" description:"parallel version probes"`
 	NoTidy  bool   `long:"no-tidy" description:"skip the final go mod tidy"`
 	Version bool   `long:"version" description:"print version and exit"`
-}
-
-func inDir(dir string, fn func() error) error {
-	if err := os.Chdir(dir); err != nil {
-		return fmt.Errorf("chdir %s: %w", dir, err)
-	}
-	if _, err := os.Stat("go.mod"); err != nil {
-		return fmt.Errorf("no go.mod in %s", dir)
-	}
-	return fn()
 }
 
 func main() {
@@ -453,23 +516,40 @@ func main() {
 		os.Exit(2)
 	}
 
-	err := inDir(opts.Dir, func() error {
-		snap := backupModFiles()
-		var runErr error
-		if opts.To != "" {
-			runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
-		} else {
-			runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
-		}
-		if runErr != nil {
-			errlog("%v", runErr)
-			errlog("Restoring go.mod and go.sum to original state")
-			snap.restore()
-			return runErr
-		}
-		return nil
-	})
-	if err != nil {
+	if err := os.Chdir(opts.Dir); err != nil {
+		errlog("chdir %s: %v", opts.Dir, err)
+		os.Exit(1)
+	}
+	if _, err := os.Stat("go.mod"); err != nil {
+		errlog("no go.mod in %s", opts.Dir)
+		os.Exit(1)
+	}
+
+	snap := backupModFiles()
+
+	// Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
+	// and go.sum exactly as we found them. Without this, killing a long
+	// `--auto` mid-iteration leaves the working tree at whatever candidate
+	// was being probed.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		errlog("Interrupted (%s); restoring go.mod and go.sum", sig)
+		snap.restore()
+		os.Exit(130)
+	}()
+
+	var runErr error
+	if opts.To != "" {
+		runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
+	} else {
+		runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
+	}
+	if runErr != nil {
+		errlog("%v", runErr)
+		errlog("Restoring go.mod and go.sum to original state")
+		snap.restore()
 		os.Exit(1)
 	}
 }

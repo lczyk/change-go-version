@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -220,6 +221,32 @@ def run_check(cmd: str) -> bool:
     return subprocess.run(cmd, shell=True).returncode == 0
 
 
+# `golang.org/toolchain` lists every Go toolchain release as
+# "v0.0.1-go1.X.Y.<os>-<arch>". Same release appears many times (one per
+# platform); dedupe.
+TOOLCHAIN_VER_RE = re.compile(r"^v0\.0\.1-go1\.(\d+)(?:\.(\d+))?")
+
+
+def fetch_patches_by_minor() -> dict[int, list[int]]:
+    """Return {minor X: [patches Y, descending, excluding 0]} from
+    `go list -m -versions golang.org/toolchain`. Pre-release suffixes
+    (rc/beta) are ignored."""
+    cp = run("go", "list", "-m", "-versions", "golang.org/toolchain", check=False)
+    if cp.returncode != 0:
+        raise RuntimeError(f"go list -m -versions golang.org/toolchain: {cp.stderr}")
+    out: dict[int, set[int]] = {}
+    for v in cp.stdout.split():
+        m = TOOLCHAIN_VER_RE.match(v)
+        if not m:
+            continue
+        x = int(m.group(1))
+        y = int(m.group(2)) if m.group(2) else 0
+        if y == 0:
+            continue  # 1.X.0 == 1.X already probed
+        out.setdefault(x, set()).add(y)
+    return {x: sorted(ys, reverse=True) for x, ys in out.items()}
+
+
 def try_version(
     cand: str,
     rounds: int,
@@ -244,14 +271,23 @@ def try_version(
 
 
 def run_auto(check_cmd: str, rounds: int, jobs: int, no_tidy: bool) -> None:
-    """Walk minors down. On a failing minor, walk patches up (first hit wins,
-    search stops). If no patch passes, continue to next minor down."""
-    MAX_PATCH = 20
-
+    """Walk minors down. On a failing minor (1.X.0), probe the highest known
+    patch for that minor; if it passes, walk patches down (over actually
+    released patches, not a contiguous range) to find the lowest passing one,
+    then stop. If the top patch fails, continue to next minor down. Patch
+    numbers come from go.dev/dl."""
     initial = read_local_go_directive()
     logging.info("Auto: baseline go %s; verifying check command...", initial)
     if not run_check(check_cmd):
         raise RuntimeError(f"baseline check failed at go {initial}")
+
+    try:
+        patches_by_minor = fetch_patches_by_minor()
+    except Exception as e:
+        logging.warning(
+            "Auto: could not fetch Go release list (%s); patch walk disabled", e
+        )
+        patches_by_minor = {}
 
     baseline = backup_modfiles()
     last_good = initial
@@ -262,19 +298,28 @@ def run_auto(check_cmd: str, rounds: int, jobs: int, no_tidy: bool) -> None:
             last_good = cand
             last_good_snap = backup_modfiles()
             continue
+        patches = patches_by_minor.get(x, [])
+        if not patches:
+            continue
+        top_y = patches[0]
         logging.info(
-            "Auto: 1.%d.0 failed; walking patches up to 1.%d.%d", x, x, MAX_PATCH
+            "Auto: 1.%d.0 failed; probing top patch 1.%d.%d first", x, x, top_y
         )
-        found = False
-        for y in range(1, MAX_PATCH + 1):
+        top_cand = f"1.{x}.{top_y}"
+        if not try_version(top_cand, rounds, jobs, no_tidy, baseline, check_cmd):
+            continue
+        last_good = top_cand
+        last_good_snap = backup_modfiles()
+        logging.info(
+            "Auto: 1.%d.%d passed; walking patches down for lowest passing", x, top_y
+        )
+        for y in patches[1:]:
             patch_cand = f"1.{x}.{y}"
-            if try_version(patch_cand, rounds, jobs, no_tidy, baseline, check_cmd):
-                last_good = patch_cand
-                last_good_snap = backup_modfiles()
-                found = True
+            if not try_version(patch_cand, rounds, jobs, no_tidy, baseline, check_cmd):
                 break
-        if found:
-            break
+            last_good = patch_cand
+            last_good_snap = backup_modfiles()
+        break
 
     restore_modfiles(last_good_snap)
     if norm(last_good) == norm(initial):
@@ -311,15 +356,24 @@ def main() -> None:
         logging.error("no go.mod in %s", args.dir)
         sys.exit(1)
     snapshot = backup_modfiles()
+
+    # Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
+    # and go.sum exactly as we found them. Without this, killing a long
+    # --auto mid-iteration leaves the working tree at whatever candidate
+    # was being probed.
+    def _on_signal(signum: int, _frame: object) -> None:
+        logging.error("Interrupted (%s); restoring go.mod and go.sum", signum)
+        restore_modfiles(snapshot)
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
     try:
         if args.to is not None:
             run_change(args.to, args.rounds, args.jobs, args.no_tidy)
         else:
             run_auto(args.auto, args.rounds, args.jobs, args.no_tidy)
-    except KeyboardInterrupt:
-        logging.error("Interrupted; restoring go.mod and go.sum")
-        restore_modfiles(snapshot)
-        os._exit(130)
     except (RuntimeError, subprocess.CalledProcessError) as e:
         msg = e if isinstance(e, RuntimeError) else f"command failed: {' '.join(e.cmd)}"
         logging.error("%s", msg)
