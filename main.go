@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
 
@@ -82,9 +83,36 @@ func runStream(name string, args ...string) error {
 	return cmd.Run()
 }
 
+// editLocalGoMod sets the `go` directive to target and drops `toolchain` from
+// ./go.mod, parsing and rewriting the file directly (no `go mod edit`
+// subprocess). target is the user-supplied form, e.g. "1.24" or "1.24.0".
+func editLocalGoMod(target string) error {
+	const path = "go.mod"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	f, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	goVer := strings.TrimPrefix(target, "v")
+	goVer = strings.TrimPrefix(goVer, "go")
+	if err := f.AddGoStmt(goVer); err != nil {
+		return fmt.Errorf("add go directive %q: %w", goVer, err)
+	}
+	f.DropToolchainStmt()
+	out, err := f.Format()
+	if err != nil {
+		return fmt.Errorf("format %s: %w", path, err)
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
 // declaredGo returns the `go` directive from <mod>@<ver>'s go.mod, or "" on failure.
 func declaredGo(mod, ver string) string {
-	stdout, _, err := runCapture("go", "mod", "download", "-json", mod+"@"+ver)
+	mv := module.Version{Path: mod, Version: ver}
+	stdout, _, err := runCapture("go", "mod", "download", "-json", mv.String())
 	if err != nil || stdout == "" {
 		return ""
 	}
@@ -148,6 +176,9 @@ func listModules(directOnly bool) []modRow {
 		if directOnly && parts[3] == "true" {
 			continue
 		}
+		if err := module.CheckPath(parts[0]); err != nil {
+			continue
+		}
 		rows = append(rows, modRow{parts[0], parts[1], parts[2]})
 	}
 	return rows
@@ -197,7 +228,8 @@ func pinBatch(mods []string, target, label string, jobs int) set {
 			continue
 		}
 		info("%s%s -> %s  (declares go %s)", label, r.mod, r.ver, r.gv)
-		if _, stderr, err := runCapture("go", "get", r.mod+"@"+r.ver); err != nil {
+		mv := module.Version{Path: r.mod, Version: r.ver}
+		if _, stderr, err := runCapture("go", "get", mv.String()); err != nil {
 			lines := strings.Split(strings.TrimSpace(stderr), "\n")
 			warn("go get failed for %s: %s", r.mod, lines[len(lines)-1])
 		}
@@ -235,8 +267,8 @@ func (s snapshot) restore() {
 func run(target string, rounds, jobs int, noTidy bool) error {
 	canonical := strings.TrimPrefix(canonGoVersion(target), "v")
 
-	if _, stderr, err := runCapture("go", "mod", "edit", "-go="+target, "-toolchain=none"); err != nil {
-		return fmt.Errorf("go mod edit: %w\n%s", err, stderr)
+	if err := editLocalGoMod(target); err != nil {
+		return err
 	}
 
 	info("Pinning direct deps to highest version with go <= %s", canonical)
