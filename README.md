@@ -16,7 +16,9 @@ this tool fills a gap in the Go toolchain: `go mod tidy -go=X` errors out when a
 
 ## why
 
-why might you want to downgrade your go version? just read https://blog.howardjohn.info/posts/go-mod-version/. tldr: go version if viral. if you are writing a library and set go version to 1.23, your users *CANNOT* use that lib with earlier go version. is that a real or an arbitrary barrier?
+[go docs](https://go.dev/wiki/Modules#how-to-upgrade-and-downgrade-dependencies) give us some info, but are mainly concerned with upgrading deps
+
+why might you want to *downgrade* your go version? just read https://blog.howardjohn.info/posts/go-mod-version/. tldr: go version if viral. if you are writing a library and set go version to 1.23, your users *CANNOT* use that lib with earlier go version. is that a real or an arbitrary barrier?
 
 ## usage
 

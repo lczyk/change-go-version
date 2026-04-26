@@ -7,6 +7,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,7 +21,11 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
+	version "github.com/lczyk/version/go"
 )
+
+//go:embed VERSION
+var versionFile string
 
 const (
 	colGreen  = "\033[32m"
@@ -439,11 +444,7 @@ func main() {
 	}
 
 	if opts.Version {
-		shortSHA := CommitSHA
-		if len(shortSHA) > 7 {
-			shortSHA = shortSHA[:7]
-		}
-		fmt.Printf("change-go-version %s (%s, %s, %s)\n", Version, shortSHA, BuildDate, BuildInfo)
+		fmt.Println("change-go-version", version.Read(strings.TrimSpace(versionFile)))
 		return
 	}
 
