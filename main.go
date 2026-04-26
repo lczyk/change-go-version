@@ -426,10 +426,12 @@ func latestPatch(minor int) int {
 }
 
 // runAuto walks the go directive downwards by minor (1.X), accepting each
-// passing version. On a failing minor, it queries the latest released patch
-// for that minor and walks patches downward (1.X.<latest>, ..., 1.X.1); the
-// first passing patch is accepted and search stops. If no patch passes (or
-// the release list cannot be fetched), the walk continues to the next minor.
+// passing version. On a failing minor, it tries the latest released patch
+// for that minor (1.X.<latest>); if that fails the search ends (no lower
+// patch can plausibly help). If it passes, patches are walked downward from
+// latest-1; each passing one becomes the new accepted version, and the walk
+// stops at the first failing patch. Final result is the lowest passing
+// version found (or baseline if none).
 func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
 	initial, err := readLocalGoDirective()
 	if err != nil {
@@ -454,17 +456,24 @@ outer:
 		maxP := latestPatch(x)
 		if maxP <= 0 {
 			info("Auto: 1.%d.0 failed; no released patches to try", x)
-			continue
+			break
 		}
-		info("Auto: 1.%d.0 failed; walking patches down from 1.%d.%d", x, x, maxP)
-		for y := maxP; y >= 1; y-- {
-			patchCand := fmt.Sprintf("1.%d.%d", x, y)
-			if tryVersion(patchCand, rounds, jobs, noTidy, baseline, checkCmd) {
-				lastGood = patchCand
-				lastGoodSnap = backupModFiles()
+		topCand := fmt.Sprintf("1.%d.%d", x, maxP)
+		info("Auto: 1.%d.0 failed; trying latest patch %s", x, topCand)
+		if !tryVersion(topCand, rounds, jobs, noTidy, baseline, checkCmd) {
+			break outer
+		}
+		lastGood = topCand
+		lastGoodSnap = backupModFiles()
+		for y := maxP - 1; y >= 1; y-- {
+			cand := fmt.Sprintf("1.%d.%d", x, y)
+			if !tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
 				break outer
 			}
+			lastGood = cand
+			lastGoodSnap = backupModFiles()
 		}
+		break outer
 	}
 
 	lastGoodSnap.restore()
