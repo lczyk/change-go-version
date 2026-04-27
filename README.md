@@ -8,7 +8,7 @@ set `go` directive to a target version, then move every dependency to the highes
 
 this works in both directions -- downgrade your `go` directive and the script walks deps backwards to compatible versions; raise it and the script bumps deps forward up to the new ceiling.
 
-**NOTE**: we we not run the testas after the version change. we *only* change the versions. you then need to run the tests and deal with the fallout yourself.
+**NOTE**: we we not run the tests after the version change. we *only* change the versions. you then need to run the tests and deal with the fallout yourself.
 
 ---
 
@@ -48,15 +48,13 @@ go run github.com/lczyk/change-go-version@latest --auto "go test ./..."
 
 ## auto mode
 
-reads the current `go` directive, verifies `--check` passes at the baseline, then for each minor version below current (e.g. 1.24 → 1.23 → 1.22 …) it: restores the original `go.mod`/`go.sum`, runs `change` to that candidate, then runs `--check`. it stops on the first failure. the lowest passing version is left applied; if nothing below the baseline passes, baseline is restored unchanged.
+reads the current `go` directive, verifies `--check` passes at the baseline, then for each minor version below current (e.g. 1.24 -> 1.23 -> 1.22 ...) it: restores the original `go.mod`/`go.sum`, runs `change` to that candidate, then runs `--check`. it stops on the first failure. the lowest passing version is left applied; if nothing below the baseline passes, baseline is restored unchanged.
 
 ## behaviour
 
 1. run `go mod edit -go=TARGET -toolchain=none`
-2. **Pass 1:** for every direct dep, list available versions newest→oldest, find the first whose own `go.mod` declares `go <= TARGET`, pin it via `go get`
-3. **Pass 2 (rounds):** scan all modules (incl. indirect) for any whose
-   currently-selected version still declares `go > TARGET`. pin each down.
-   repeat until stable or `-rounds` exhausted
+2. for every direct dep, list available versions newest -> oldest, find the first whose own `go.mod` declares `go <= TARGET`, pin it via `go get`
+3. scan all modules (incl. indirect) for any whose currently-selected version still declares `go > TARGET`. pin each down. repeat until stable or `-rounds` exhausted
 4. run `go mod tidy -go=TARGET`
 
 `GOTOOLCHAIN=local` is set throughout to prevent the Go toolchain from
@@ -72,19 +70,10 @@ a common failure is that a direct dep has **no** version compatible with your TA
 
 we do **NOT** run go tests after we change the version so you will need to still check all works after the version change.
 
-## Requirements
-
-- Go 1.21+ (uses `min`/`max` builtins).
-- Network access to the module proxy (probing dep `go.mod` files).
-
-## Why not just X?
+## why not just X?
 
 - `go mod tidy -go=X` -- errors on conflicts, doesn't cascade-downgrade
 - `go get -u ./...` -- upgrades everything to latest, can raise the `go`
   directive past your target
 - [`marwan-at-work/mod`](https://github.com/marwan-at-work/mod) -- focus on upgrades, not pinning to a Go version
 - [`oligot/go-mod-upgrade`](https://github.com/oligot/go-mod-upgrade) -- also focused on upgrades
-
-## License
-
-MIT
