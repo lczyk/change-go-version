@@ -14,6 +14,42 @@ this works in both directions -- downgrade your `go` directive and the script wa
 
 this tool fills a gap in the Go toolchain: `go mod tidy -go=X` errors out when any selected dep needs a newer Go than X, instead of cascading the downgrade. `go get -u ./...` upgrades everything to `@latest` and silently raises your `go` directive to whatever those need. neither does what you usually want when pinning to a specific Go version.
 
+## example
+
+```
+module my-little-module
+
+go 1.26.0
+
+require golang.org/x/mod v0.35.0
+```
+
+if i try to downgrade with `go`:
+
+```bash
+$ go mod tidy -go=1.21
+go: golang.org/x/mod@v0.35.0 requires go@1.25.0, but 1.21 is requested
+```
+
+however, with `change-go-version`:
+
+```bash
+$ go run github.com/lczyk/change-go-version@latest --to 1.21
+INFO: Pinning direct deps to highest version with go <= 1.21.0
+INFO: golang.org/x/mod -> v0.20.0  (declares go 1.18)
+INFO: Done. go directive: 1.21.0
+```
+
+and
+
+```
+module my-little-module
+
+go 1.21.0
+
+require golang.org/x/mod v0.20.0
+```
+
 ## why
 
 [go docs](https://go.dev/wiki/Modules#how-to-upgrade-and-downgrade-dependencies) give us some info, but are mainly concerned with upgrading deps
