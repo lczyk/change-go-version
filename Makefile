@@ -16,7 +16,7 @@ $(BIN): $(SRCS) VERSION go.mod go.sum Makefile
 	mkdir -p ./bin
 	go build -o $(BIN) .
 
-.PHONY: test go-test py-test
+.PHONY: test go-test py-test int-test proxy
 test: go-test py-test  ## Run all tests (Go + Python)
 
 go-test:  ## Run Go test suite with race detector
@@ -25,6 +25,16 @@ go-test:  ## Run Go test suite with race detector
 	else \
 		go test -race ./...; \
 	fi
+
+int-test:  ## Run integration test suite against local proxy
+	@if command -v gotest >/dev/null 2>&1; then \
+		gotest -tags=integration -count=1 -v ./integration/...; \
+	else \
+		go test -tags=integration -count=1 -v ./integration/...; \
+	fi
+
+proxy:  ## (Re)generate integration/proxy from integration/spec.txt
+	go run ./integration/cmd/buildproxy -spec integration/spec.txt -out integration/proxy
 
 py-test:  ## Run Python test suite with pytest (via uv)
 	uvx pytest $(PY_SRCS)

@@ -93,6 +93,14 @@ func runStream(name string, args ...string) error {
 	return cmd.Run()
 }
 
+// normalizeTarget strips a leading "v" or "go" prefix and returns the form
+// that should appear in the go.mod `go` directive (e.g. "1.24" or "1.24.0").
+func normalizeTarget(target string) string {
+	v := strings.TrimPrefix(target, "v")
+	v = strings.TrimPrefix(v, "go")
+	return v
+}
+
 // editLocalGoMod sets the `go` directive to target and drops `toolchain` from
 // ./go.mod, parsing and rewriting the file directly (no `go mod edit`
 // subprocess). target is the user-supplied form, e.g. "1.24" or "1.24.0".
@@ -106,8 +114,7 @@ func editLocalGoMod(target string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
-	goVer := strings.TrimPrefix(target, "v")
-	goVer = strings.TrimPrefix(goVer, "go")
+	goVer := normalizeTarget(target)
 	if err := f.AddGoStmt(goVer); err != nil {
 		return fmt.Errorf("add go directive %q: %w", goVer, err)
 	}
@@ -310,20 +317,25 @@ func runCheck(cmd string) error {
 }
 
 func runChange(target string, rounds, jobs int, noTidy bool) error {
-	canonical := strings.TrimPrefix(canonGoVersion(target), "v")
+	goVer := normalizeTarget(target)
 
 	if err := editLocalGoMod(target); err != nil {
 		return err
 	}
 
-	info("Pinning direct deps to highest version with go <= %s", canonical)
+	info("Pinning direct deps to highest version with go <= %s", goVer)
 	direct := make([]string, 0)
 	for _, r := range listModules(true) {
 		direct = append(direct, r.Path)
 	}
 	if bad := pinBatch(direct, target, "", jobs); len(bad) > 0 {
 		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s",
-			canonical, strings.Join(bad.sorted(), ", "))
+			goVer, strings.Join(bad.sorted(), ", "))
+	}
+	// `go get` may raise the go directive when a fetched module declares
+	// `go > current`. Re-pin to the user's target so the bump never sticks.
+	if err := editLocalGoMod(target); err != nil {
+		return err
 	}
 
 	skip := set{}
@@ -336,16 +348,19 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 		}
 		if len(offenders) == 0 {
 			if !noTidy {
-				if err := runStream("go", "mod", "tidy", "-go="+canonical); err != nil {
+				if err := runStream("go", "mod", "tidy", "-go="+goVer); err != nil {
 					return fmt.Errorf("go mod tidy: %w", err)
 				}
 			}
-			info("Done. go directive: %s", canonical)
+			info("Done. go directive: %s", goVer)
 			return nil
 		}
 		info("Round %d: %d offending indirect(s)", n, len(offenders))
 		for m := range pinBatch(offenders, target, fmt.Sprintf("[round %d] ", n), jobs) {
 			skip.add(m)
+		}
+		if err := editLocalGoMod(target); err != nil {
+			return err
 		}
 	}
 	return fmt.Errorf("hit max rounds (%d); indirects still violate target", rounds)
@@ -384,7 +399,11 @@ func latestPatch(minor int) int {
 		return v
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://go.dev/dl/?mode=json&include=all")
+	feedURL := "https://go.dev/dl/?mode=json&include=all"
+	if v := os.Getenv("CGV_RELEASE_FEED"); v != "" {
+		feedURL = v
+	}
+	resp, err := client.Get(feedURL)
 	if err != nil {
 		warn("fetch go release list: %v", err)
 		patchCache.m[minor] = -1

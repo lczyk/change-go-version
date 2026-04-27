@@ -1,0 +1,42 @@
+# buildproxy spec: lines of `mod ver pkg [pkg ...]`
+# `pkg` = subpath relative to module root; "." = module root pkg
+# `subpath=name` overrides derived package identifier
+#
+# go-flags: spread of go directives across versions
+#   v1.4.0 — no go directive (treated as 1.0)
+#   v1.5.0 — go 1.15
+#   v1.6.0 — go 1.20
+#   v1.6.1 — go 1.20
+github.com/jessevdk/go-flags v1.4.0 .=flags
+github.com/jessevdk/go-flags v1.5.0 .=flags
+github.com/jessevdk/go-flags v1.6.0 .=flags
+github.com/jessevdk/go-flags v1.6.1 .=flags
+
+# Synthetic dep with all versions floored at go 99.99 — used to drive the
+# unresolvable-direct-dep failure path. Module path lives under a reserved
+# .test TLD so it can never collide with a real proxy entry.
+acme.test/needs-future v1.0.0 -go=99.99 .=needsfuture
+acme.test/needs-future v1.1.0 -go=99.99 .=needsfuture
+
+# Indirect-cascade fixture: `direct` requires `indirect` v1.5.0 (go 1.25).
+# Tool targets 1.20 → must downgrade indirect to v1.0.0 (go 1.15).
+acme.test/direct v1.0.0 -go=1.15 -req=acme.test/indirect@v1.5.0 .=direct
+acme.test/indirect v1.0.0 -go=1.15 .=indirect
+acme.test/indirect v1.5.0 -go=1.25 .=indirect
+
+# Roundtrip fixture deps. Mirrors the repo's own go.mod shape: go-flags +
+# lczyk/{assert,version/go} + golang.org/x/{mod,sys}. Each x/mod version
+# transitively requires x/sys v0.21.0 so tidy keeps it as `// indirect`.
+# Picker behaviour at the two test targets:
+#   1.21 → x/mod v0.20.0 (go 1.18) — newer x/mod versions declare 1.22.0
+#   1.26 → x/mod v0.22.0 (go 1.22.0)
+github.com/lczyk/assert v0.3.0 .=assert
+github.com/lczyk/assert v0.3.1 .=assert
+github.com/lczyk/version/go v0.4.0 .=version
+github.com/lczyk/version/go v0.5.0 .=version
+golang.org/x/mod v0.20.0 -req=golang.org/x/sys@v0.21.0 modfile
+golang.org/x/mod v0.21.0 -req=golang.org/x/sys@v0.21.0 modfile
+golang.org/x/mod v0.22.0 -req=golang.org/x/sys@v0.21.0 modfile
+golang.org/x/sys v0.20.0 .=sys
+golang.org/x/sys v0.21.0 .=sys
+golang.org/x/sys v0.22.0 .=sys

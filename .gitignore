@@ -3,3 +3,9 @@
 /cover.out
 /cover.html
 __pycache__/
+/buildproxy
+
+# Module zips materialised lazily at integration-test time from spec.txt +
+# committed .mod files. Deterministic (hashed in SUMS), so they don't need to
+# live in git.
+integration/proxy/**/*.zip
