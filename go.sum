@@ -1,7 +1,7 @@
 github.com/jessevdk/go-flags v1.6.1 h1:Cvu5U8UGrLay1rZfv/zP7iLpSHGUZ/Ou68T0iX1bBK4=
 github.com/jessevdk/go-flags v1.6.1/go.mod h1:Mk8T1hIAWpOiJiHa9rJASDK2UGWji0EuPGBnNLMooyc=
-github.com/lczyk/assert v0.4.0 h1:70EBlvftgiIc3sjj4C0Z1K5ONrpVeM9IQUu8L5npZks=
-github.com/lczyk/assert v0.4.0/go.mod h1:Vv3LWPfjC/FbJ3IXb22YNWxZWicc1x6R7hzDCf+RARc=
+github.com/lczyk/assert v0.5.0 h1:DVuNAJjsTaIGsnl0+LBR2XYYcozYgkKckIS1pTLQdsY=
+github.com/lczyk/assert v0.5.0/go.mod h1:Vv3LWPfjC/FbJ3IXb22YNWxZWicc1x6R7hzDCf+RARc=
 github.com/lczyk/version/go v0.5.0 h1:PRge4vy77pPUcYiThEwaLMaHvMe4Xad1XKTOgdLOlVY=
 github.com/lczyk/version/go v0.5.0/go.mod h1:8CHgUp1ILDx0+yN/F53SM/QKRjVEXjt3Od4D4L0986Y=
 golang.org/x/mod v0.20.0 h1:utOm6MM3R3dnawAiJgn0y+xvuYRsm1RKM/4giyfDgV0=

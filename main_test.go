@@ -1,12 +1,53 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/lczyk/assert"
 )
+
+// fakeFeed serves a Go release JSON feed with the given versions and sets
+// CGV_RELEASE_FEED to point at it for the duration of the test. Also resets
+// patchCache so prior cached lookups don't bleed in.
+func fakeFeed(t *testing.T, versions ...string) {
+	t.Helper()
+	body := "["
+	for i, v := range versions {
+		if i > 0 {
+			body += ","
+		}
+		body += `{"version":"` + v + `"}`
+	}
+	body += "]"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	prev, hadPrev := os.LookupEnv("CGV_RELEASE_FEED")
+	os.Setenv("CGV_RELEASE_FEED", srv.URL)
+	t.Cleanup(func() {
+		if hadPrev {
+			os.Setenv("CGV_RELEASE_FEED", prev)
+		} else {
+			os.Unsetenv("CGV_RELEASE_FEED")
+		}
+	})
+
+	patchCache.Lock()
+	patchCache.m = map[int]int{}
+	patchCache.Unlock()
+	t.Cleanup(func() {
+		patchCache.Lock()
+		patchCache.m = map[int]int{}
+		patchCache.Unlock()
+	})
+}
 
 func chdir(t *testing.T, dir string) {
 	t.Helper()
@@ -113,6 +154,106 @@ func TestReadLocalGoDirective(t *testing.T) {
 	got, err := readLocalGoDirective()
 	assert.NoError(t, err)
 	assert.Equal(t, got, "1.22")
+}
+
+func TestPatchOf(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantP   int
+		wantHas bool
+	}{
+		{"1.22", 0, false},
+		{"1.22.0", 0, true},
+		{"1.22.3", 3, true},
+		{"go1.22.13", 13, true},
+		{"v1.21.99", 99, true},
+		{"1.22rc1", 0, false},
+		{"1", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			p, has := patchOf(tc.in)
+			assert.Equal(t, p, tc.wantP)
+			assert.Equal(t, has, tc.wantHas)
+		})
+	}
+}
+
+func TestLatestPatch(t *testing.T) {
+	fakeFeed(t, "go1.21", "go1.21.1", "go1.21.13", "go1.21.5", "go1.22", "go1.22rc1", "go1.20")
+
+	p, ok := latestPatch(21)
+	assert.That(t, ok, "feed should be reachable")
+	assert.Equal(t, p, 13)
+
+	p, ok = latestPatch(22)
+	assert.That(t, ok, "feed should be reachable")
+	assert.Equal(t, p, 0) // base release only, no patches
+
+	p, ok = latestPatch(99)
+	assert.That(t, ok, "feed should be reachable")
+	assert.Equal(t, p, -1) // minor not released
+}
+
+func TestLatestPatchFeedFailure(t *testing.T) {
+	prev, hadPrev := os.LookupEnv("CGV_RELEASE_FEED")
+	// 127.0.0.1:1 is reserved/unbound — connection refused, fast.
+	os.Setenv("CGV_RELEASE_FEED", "http://127.0.0.1:1/")
+	t.Cleanup(func() {
+		if hadPrev {
+			os.Setenv("CGV_RELEASE_FEED", prev)
+		} else {
+			os.Unsetenv("CGV_RELEASE_FEED")
+		}
+	})
+	patchCache.Lock()
+	patchCache.m = map[int]int{}
+	patchCache.Unlock()
+	t.Cleanup(func() {
+		patchCache.Lock()
+		patchCache.m = map[int]int{}
+		patchCache.Unlock()
+	})
+
+	_, ok := latestPatch(21)
+	assert.That(t, !ok, "feed failure should report ok=false")
+}
+
+func TestValidateTarget(t *testing.T) {
+	fakeFeed(t, "go1.21", "go1.21.13", "go1.22", "go1.22.3")
+
+	assert.NoError(t, validateTarget("1.21"))
+	assert.NoError(t, validateTarget("1.21.0"))
+	assert.NoError(t, validateTarget("1.21.13"))
+	assert.NoError(t, validateTarget("1.22.3"))
+	assert.NoError(t, validateTarget("go1.21.13"))
+
+	assert.Error(t, validateTarget("1.21.99"), `^go 1\.21\.99 is not a released Go version \(latest patch is 1\.21\.13\)$`)
+	assert.Error(t, validateTarget("1.99"), `^go 1\.99 is not a released Go version$`)
+	assert.Error(t, validateTarget("1.99.0"), `^go 1\.99 is not a released Go version$`)
+}
+
+func TestValidateTargetFeedFailure(t *testing.T) {
+	prev, hadPrev := os.LookupEnv("CGV_RELEASE_FEED")
+	os.Setenv("CGV_RELEASE_FEED", "http://127.0.0.1:1/")
+	t.Cleanup(func() {
+		if hadPrev {
+			os.Setenv("CGV_RELEASE_FEED", prev)
+		} else {
+			os.Unsetenv("CGV_RELEASE_FEED")
+		}
+	})
+	patchCache.Lock()
+	patchCache.m = map[int]int{}
+	patchCache.Unlock()
+	t.Cleanup(func() {
+		patchCache.Lock()
+		patchCache.m = map[int]int{}
+		patchCache.Unlock()
+	})
+
+	// Feed unreachable: validation must pass through (offline mode).
+	assert.NoError(t, validateTarget("1.21.99"))
 }
 
 func TestSnapshotRestoreMissing(t *testing.T) {
