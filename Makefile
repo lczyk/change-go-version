@@ -12,7 +12,7 @@ help:  ## Show this help
 .PHONY: build
 build: $(BIN)  ## Build binary into ./bin
 
-$(BIN): $(SRCS) VERSION go.mod go.sum Makefile
+$(BIN): $(SRCS) VERSION go.mod go.sum makefile
 	mkdir -p ./bin
 	go build -o $(BIN) .
 

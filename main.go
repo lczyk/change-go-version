@@ -316,7 +316,51 @@ func runCheck(cmd string) error {
 	return c.Run()
 }
 
+// patchOf returns the third component (Y) of a canonical "vMAJOR.MINOR.PATCH"
+// Go version, and whether the original target string had an explicit patch.
+func patchOf(target string) (patch int, hasPatch bool) {
+	v := normalizeTarget(target)
+	for i, r := range v {
+		if !(r >= '0' && r <= '9' || r == '.') {
+			v = v[:i]
+			break
+		}
+	}
+	v = strings.TrimRight(v, ".")
+	parts := strings.Split(v, ".")
+	if len(parts) < 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// validateTarget rejects targets whose minor or patch is not a released Go
+// version. Feed-fetch failures pass through with a warning so offline use
+// still works.
+func validateTarget(target string) error {
+	minor := minorOf(canonGoVersion(target))
+	maxP, ok := latestPatch(minor)
+	if !ok {
+		return nil
+	}
+	if maxP < 0 {
+		return fmt.Errorf("go 1.%d is not a released Go version", minor)
+	}
+	patch, hasPatch := patchOf(target)
+	if hasPatch && patch > maxP {
+		return fmt.Errorf("go 1.%d.%d is not a released Go version (latest patch is 1.%d.%d)", minor, patch, minor, maxP)
+	}
+	return nil
+}
+
 func runChange(target string, rounds, jobs int, noTidy bool) error {
+	if err := validateTarget(target); err != nil {
+		return err
+	}
 	goVer := normalizeTarget(target)
 
 	if err := editLocalGoMod(target); err != nil {
@@ -390,13 +434,14 @@ var patchCache = struct {
 }{m: map[int]int{}}
 
 // latestPatch returns the highest released patch Y for "go1.<minor>.Y" from
-// the official Go release feed. Returns 0 if only "go1.<minor>" (no patches)
-// exists, or -1 on fetch/parse failure.
-func latestPatch(minor int) int {
+// the official Go release feed. Returns (0, true) if only "go1.<minor>" (no
+// patches) exists, (-1, true) if the minor itself is not released, or
+// (-1, false) on fetch/parse failure.
+func latestPatch(minor int) (int, bool) {
 	patchCache.Lock()
 	defer patchCache.Unlock()
 	if v, ok := patchCache.m[minor]; ok {
-		return v
+		return v, true
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	feedURL := "https://go.dev/dl/?mode=json&include=all"
@@ -406,15 +451,13 @@ func latestPatch(minor int) int {
 	resp, err := client.Get(feedURL)
 	if err != nil {
 		warn("fetch go release list: %v", err)
-		patchCache.m[minor] = -1
-		return -1
+		return -1, false
 	}
 	defer resp.Body.Close()
 	var rels []struct{ Version string }
 	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		warn("parse go release list: %v", err)
-		patchCache.m[minor] = -1
-		return -1
+		return -1, false
 	}
 	prefix := fmt.Sprintf("go1.%d", minor)
 	best := -1
@@ -441,7 +484,7 @@ func latestPatch(minor int) int {
 		}
 	}
 	patchCache.m[minor] = best
-	return best
+	return best, true
 }
 
 // runAuto walks the go directive downwards by minor (1.X), accepting each
@@ -472,7 +515,7 @@ outer:
 			lastGoodSnap = backupModFiles()
 			continue
 		}
-		maxP := latestPatch(x)
+		maxP, _ := latestPatch(x)
 		if maxP <= 0 {
 			info("Auto: 1.%d.0 failed; no released patches to try", x)
 			break
