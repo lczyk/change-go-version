@@ -294,6 +294,34 @@ func TestReadLocalGoDirectiveInvalid(t *testing.T) {
 	assert.Equal(t, got, "1.21.99")
 }
 
+func TestCheckLocalGoDirective(t *testing.T) {
+	fakeFeed(t, "go1.21", "go1.21.13", "go1.22", "go1.22.3")
+
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	// Valid directive: no warning.
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.21.13\n"), 0o644))
+	assert.Equal(t, checkLocalGoDirective(), "")
+
+	// Invalid patch: warn but non-empty.
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.21.99\n"), 0o644))
+	got := checkLocalGoDirective()
+	assert.ContainsString(t, got, "current go.mod")
+	assert.ContainsString(t, got, "1.21.99")
+	assert.ContainsString(t, got, "proceeding anyway")
+
+	// Invalid minor: also warns.
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.99\n"), 0o644))
+	got = checkLocalGoDirective()
+	assert.ContainsString(t, got, "1.99")
+	assert.ContainsString(t, got, "proceeding anyway")
+
+	// Missing go.mod: silent (caller handles existence).
+	assert.NoError(t, os.Remove("go.mod"))
+	assert.Equal(t, checkLocalGoDirective(), "")
+}
+
 func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)

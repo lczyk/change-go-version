@@ -357,6 +357,21 @@ func validateTarget(target string) error {
 	return nil
 }
 
+// checkLocalGoDirective returns a warning message if go.mod's current go
+// directive names an unreleased version (or empty if it looks valid /
+// unreadable / the feed is unreachable). The directive is informational only
+// — we never refuse to run because of it.
+func checkLocalGoDirective() string {
+	cur, err := readLocalGoDirective()
+	if err != nil {
+		return ""
+	}
+	if e := validateTarget(cur); e != nil {
+		return fmt.Sprintf("current go.mod %v; proceeding anyway", e)
+	}
+	return ""
+}
+
 func runChange(target string, rounds, jobs int, noTidy bool) error {
 	if err := validateTarget(target); err != nil {
 		return err
@@ -586,6 +601,10 @@ func main() {
 	if _, err := os.Stat("go.mod"); err != nil {
 		errlog("no go.mod in %s", opts.Dir)
 		os.Exit(1)
+	}
+
+	if msg := checkLocalGoDirective(); msg != "" {
+		warn("%s", msg)
 	}
 
 	snap := backupModFiles()
