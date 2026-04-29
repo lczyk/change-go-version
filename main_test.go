@@ -256,6 +256,44 @@ func TestValidateTargetFeedFailure(t *testing.T) {
 	assert.NoError(t, validateTarget("1.21.99"))
 }
 
+// If go.mod starts with an unreleased / invalid go directive (e.g. 1.21.99),
+// the snapshot must preserve and restore those exact bytes. We don't validate
+// the *current* directive — only the user-supplied target — so an invalid
+// baseline is fine, and aborts must put the file back exactly as found.
+func TestSnapshotPreservesInvalidGoDirective(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	original := "module x\n\ngo 1.21.99\n"
+	assert.NoError(t, os.WriteFile("go.mod", []byte(original), 0o644))
+
+	snap := backupModFiles()
+
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.22\n"), 0o644))
+	assert.NoError(t, os.WriteFile("go.sum", []byte("scratch\n"), 0o644))
+
+	snap.restore()
+
+	got, err := os.ReadFile("go.mod")
+	assert.NoError(t, err)
+	assert.Equal(t, string(got), original)
+
+	_, err = os.Stat("go.sum")
+	assert.That(t, os.IsNotExist(err), "go.sum should have been deleted on restore")
+}
+
+// readLocalGoDirective must return whatever go directive go.mod currently has,
+// even if it names an unreleased patch. validateTarget only ever runs against
+// the user-supplied target, never against this value.
+func TestReadLocalGoDirectiveInvalid(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.21.99\n"), 0o644))
+	got, err := readLocalGoDirective()
+	assert.NoError(t, err)
+	assert.Equal(t, got, "1.21.99")
+}
+
 func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
