@@ -1,0 +1,32 @@
+{
+  "version": "0.2",
+  "language": "en-GB",
+  "ignorePaths": [
+    "bin/**",
+    "vendor/**",
+    "go.sum",
+    "LICENSE",
+    "__pycache__/**"
+  ],
+  "words": [
+    "behaviour",
+    "cand",
+    "errlog",
+    "gofmt",
+    "gomod",
+    "gotest",
+    "GOTOOLCHAIN",
+    "goversion",
+    "incl",
+    "indirects",
+    "jessevdk",
+    "lczyk",
+    "marwan",
+    "modfile",
+    "modfiles",
+    "oligot",
+    "rels",
+    "resp",
+    "signum"
+  ]
+}

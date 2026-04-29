@@ -53,6 +53,14 @@ py-format:  ## ruff format + autofix in place
 	uvx ruff format $(PY_SRCS)
 	uvx ruff check --fix $(PY_SRCS)
 
+.PHONY: spellcheck
+spellcheck:  ## Spellcheck sources and docs with cspell (via npx)
+	npx --yes cspell --no-progress --gitignore "**/*.go" "**/*.py" "**/*.md" "Makefile"
+
+.PHONY: verify
+verify: lint test spellcheck  ## Pre-PR gate: lint, test, spellcheck
+	@echo "All checks passed."
+
 .PHONY: clean
 clean:  ## Remove build artifacts and generated files
 	rm -f $(BIN)
