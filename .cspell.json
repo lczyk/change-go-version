@@ -5,8 +5,7 @@
     "bin/**",
     "vendor/**",
     "go.sum",
-    "LICENSE",
-    "__pycache__/**"
+    "LICENSE"
   ],
   "words": [
     "behaviour",
@@ -26,7 +25,6 @@
     "modfiles",
     "oligot",
     "rels",
-    "resp",
-    "signum"
+    "resp"
   ]
 }
