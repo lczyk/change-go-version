@@ -263,9 +263,9 @@ func TestValidateTarget(t *testing.T) {
 	assert.NoError(t, validateTarget("1.22.3"))
 	assert.NoError(t, validateTarget("go1.21.13"))
 
-	assert.Error(t, validateTarget("1.21.99"), `^go 1\.21\.99 is not a released Go version \(latest patch is 1\.21\.13\)$`)
-	assert.Error(t, validateTarget("1.99"), `^go 1\.99 is not a released Go version$`)
-	assert.Error(t, validateTarget("1.99.0"), `^go 1\.99 is not a released Go version$`)
+	assert.Error(t, validateTarget("1.21.99"), "go 1.21.99 is not a released Go version (latest patch is 1.21.13)")
+	assert.Error(t, validateTarget("1.99"), "go 1.99 is not a released Go version")
+	assert.Error(t, validateTarget("1.99.0"), "go 1.99 is not a released Go version")
 }
 
 func TestValidateTargetFeedFailure(t *testing.T) {
