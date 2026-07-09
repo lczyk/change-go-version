@@ -160,26 +160,35 @@ func editLocalGoMod(target string) error {
 	return os.WriteFile(path, out, 0o644)
 }
 
-// declaredGo returns the `go` directive from <mod>@<ver>'s go.mod, or "" on failure.
-func declaredGo(mod, ver string) string {
+// declaredMod returns the `go` directive and the require list from
+// <mod>@<ver>'s go.mod. goVersion is "" only when the module could not be
+// downloaded/read; a module with no go directive reports "1.0" (as the Go
+// toolchain does). requires is nil when the go.mod could not be parsed.
+func declaredMod(mod, ver string) (goVersion string, requires []module.Version) {
 	mv := module.Version{Path: mod, Version: ver}
 	stdout, _, err := runCapture("go", "mod", "download", "-json", mv.String())
 	if err != nil || stdout == "" {
-		return ""
+		return "", nil
 	}
 	var meta struct{ GoMod string }
 	if err := json.Unmarshal([]byte(stdout), &meta); err != nil || meta.GoMod == "" {
-		return ""
+		return "", nil
 	}
 	data, err := os.ReadFile(meta.GoMod)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	f, err := modfile.ParseLax(meta.GoMod, data, nil)
-	if err != nil || f.Go == nil {
-		return "1.0"
+	if err != nil {
+		return "1.0", nil
 	}
-	return f.Go.Version
+	for _, r := range f.Require {
+		requires = append(requires, r.Mod)
+	}
+	if f.Go == nil {
+		return "1.0", requires
+	}
+	return f.Go.Version, requires
 }
 
 // lastLine returns the final non-empty line of s, or "unknown" if there is none.
@@ -218,6 +227,27 @@ const (
 	pickIncompatible                   // has releases, none declaring go <= target
 )
 
+// requiresExceedTarget reports whether any module in reqs is pinned at a
+// version whose own go.mod declares go > target. Such a requirement is a hard
+// MVS floor: selecting the requiring version cannot yield a build list that
+// satisfies the target, because the required module can never be resolved below
+// that floor. Rejecting such a candidate (and trying a lower one) is what breaks
+// the testify<->objx style oscillation, where the newest compatible version of
+// a dep `require`s an indirect that itself declares a newer go, so pinning the
+// indirect down never sticks -- MVS keeps re-raising it to that floor.
+func requiresExceedTarget(reqs []module.Version, target string) bool {
+	for _, r := range reqs {
+		gv, _ := declaredMod(r.Path, r.Version)
+		if gv == "" {
+			continue // missing data; don't reject on a failed lookup
+		}
+		if compareGo(gv, target) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func pickVersion(mod, target string) (ver, declared string, status pickStatus) {
 	versions, err := listVersions(mod)
 	// No enumerable releases -- an untagged module, an unreachable proxy, a
@@ -228,13 +258,17 @@ func pickVersion(mod, target string) (ver, declared string, status pickStatus) {
 		return "", "", pickNoVersions
 	}
 	for _, v := range versions {
-		gv := declaredGo(mod, v)
+		gv, requires := declaredMod(mod, v)
 		if gv == "" {
 			continue
 		}
-		if compareGo(gv, target) <= 0 {
-			return v, gv, pickOK
+		if compareGo(gv, target) > 0 {
+			continue // the module itself declares go > target
 		}
+		if requiresExceedTarget(requires, target) {
+			continue // its own requirements would force go > target
+		}
+		return v, gv, pickOK
 	}
 	return "", "", pickIncompatible
 }
