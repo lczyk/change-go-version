@@ -182,39 +182,74 @@ func declaredGo(mod, ver string) string {
 	return f.Go.Version
 }
 
-// listVersions returns versions newest-first.
-func listVersions(mod string) []string {
-	stdout, _, err := runCapture("go", "list", "-m", "-versions", mod)
+// lastLine returns the final non-empty line of s, or "unknown" if there is none.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		return "unknown"
+	}
+	return last
+}
+
+// listVersions returns the module's tagged versions, newest-first. An empty
+// slice and a nil error means the module has no tagged releases (it is only
+// reachable at a pseudo-version).
+func listVersions(mod string) ([]string, error) {
+	stdout, stderr, err := runCapture("go", "list", "-m", "-versions", mod)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("%s", lastLine(stderr))
 	}
 	fields := strings.Fields(strings.TrimSpace(stdout))
 	if len(fields) <= 1 {
-		return nil
+		return nil, nil
 	}
 	vs := fields[1:]
 	slices.Reverse(vs)
-	return vs
+	return vs, nil
 }
 
-func pickVersion(mod, target string) (ver, declared string, ok bool) {
-	for _, v := range listVersions(mod) {
+// pickStatus explains why pickVersion did or did not settle on a version.
+type pickStatus int
+
+const (
+	pickOK           pickStatus = iota // found a release declaring go <= target
+	pickNoVersions                     // nothing to choose from; leave the module where it is
+	pickIncompatible                   // has releases, none declaring go <= target
+)
+
+func pickVersion(mod, target string) (ver, declared string, status pickStatus) {
+	versions, err := listVersions(mod)
+	// No enumerable releases -- an untagged module, an unreachable proxy, a
+	// module only ever used at a pseudo-version. That is not the same as
+	// "every release is too new": there is simply nothing to pick, so the
+	// module keeps whatever version it already has.
+	if err != nil || len(versions) == 0 {
+		return "", "", pickNoVersions
+	}
+	for _, v := range versions {
 		gv := declaredGo(mod, v)
 		if gv == "" {
 			continue
 		}
 		if compareGo(gv, target) <= 0 {
-			return v, gv, true
+			return v, gv, pickOK
 		}
 	}
-	return "", "", false
+	return "", "", pickIncompatible
 }
 
 type modRow struct{ Path, Version, GoVersion string }
 
-func listModules(directOnly bool) []modRow {
+// listModules returns the build list. `go list -e` keeps per-module problems
+// (bad paths, deps requiring a newer go) out of the exit code, so a non-zero
+// exit means the module graph could not be loaded at all.
+func listModules(directOnly bool) ([]modRow, error) {
 	const fmtTpl = "{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.GoVersion}}\t{{.Indirect}}{{end}}"
-	stdout, _, _ := runCapture("go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
+	stdout, stderr, err := runCapture("go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
+	if err != nil {
+		return nil, fmt.Errorf("go list -m all: %s", lastLine(stderr))
+	}
 	var rows []modRow
 	for _, line := range strings.Split(stdout, "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -232,7 +267,7 @@ func listModules(directOnly bool) []modRow {
 		}
 		rows = append(rows, modRow{parts[0], parts[1], parts[2]})
 	}
-	return rows
+	return rows, nil
 }
 
 type set map[string]struct{}
@@ -248,12 +283,30 @@ func (s set) sorted() []string {
 	return out
 }
 
+// pinOutcome records the modules pinBatch could not move, and why. A module
+// absent from all three sets was pinned successfully.
+type pinOutcome struct {
+	incompatible set // has tagged releases, none declaring go <= target
+	noVersions   set // nothing to choose from; left at its current version
+	getFailed    set // a compatible release was found, but `go get` rejected it
+}
+
+// stuck lists every module pinBatch failed to move, for any reason.
+func (o pinOutcome) stuck() []string {
+	all := set{}
+	for _, s := range []set{o.incompatible, o.noVersions, o.getFailed} {
+		for k := range s {
+			all.add(k)
+		}
+	}
+	return all.sorted()
+}
+
 // pinBatch probes versions for each mod in parallel, then `go get`s them serially.
-// Returns mods for which no compatible version exists.
-func pinBatch(mods []string, target, label string, jobs int) set {
+func pinBatch(mods []string, target, label string, jobs int) pinOutcome {
 	type result struct {
 		mod, ver, gv string
-		ok           bool
+		status       pickStatus
 	}
 	results := make([]result, len(mods))
 	limit := max(1, min(jobs, len(mods)))
@@ -265,27 +318,50 @@ func pinBatch(mods []string, target, label string, jobs int) set {
 		go func(i int, m string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			v, gv, ok := pickVersion(m, target)
-			results[i] = result{m, v, gv, ok}
+			v, gv, status := pickVersion(m, target)
+			results[i] = result{m, v, gv, status}
 		}(i, m)
 	}
 	wg.Wait()
 
-	unresolvable := set{}
+	out := pinOutcome{incompatible: set{}, noVersions: set{}, getFailed: set{}}
 	for _, r := range results {
-		if !r.ok {
+		switch r.status {
+		case pickNoVersions:
+			warn("no selectable versions for %s; leaving it at its current version", r.mod)
+			out.noVersions.add(r.mod)
+			continue
+		case pickIncompatible:
 			warn("no compatible version for %s", r.mod)
-			unresolvable.add(r.mod)
+			out.incompatible.add(r.mod)
 			continue
 		}
 		info("%s%s -> %s  (declares go %s)", label, r.mod, r.ver, r.gv)
 		mv := module.Version{Path: r.mod, Version: r.ver}
 		if _, stderr, err := runCapture("go", "get", mv.String()); err != nil {
-			lines := strings.Split(strings.TrimSpace(stderr), "\n")
-			warn("go get failed for %s: %s", r.mod, lines[len(lines)-1])
+			warn("go get failed for %s: %s", r.mod, lastLine(stderr))
+			out.getFailed.add(r.mod)
 		}
 	}
-	return unresolvable
+	return out
+}
+
+// partitionViolators splits the build list by target compliance. violating is
+// every module still requiring go > target; offenders is the subset not in
+// skip, i.e. the ones still worth another pinning round. An empty offenders
+// list alongside a non-empty violating list means we ran out of ideas -- not
+// that the target was met.
+func partitionViolators(rows []modRow, target string, skip set) (violating, offenders []string) {
+	for _, r := range rows {
+		if r.GoVersion == "" || compareGo(r.GoVersion, target) <= 0 {
+			continue
+		}
+		violating = append(violating, r.Path)
+		if !skip.has(r.Path) {
+			offenders = append(offenders, r.Path)
+		}
+	}
+	return violating, offenders
 }
 
 type snapshot struct {
@@ -417,14 +493,27 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 	}
 
 	info("Pinning direct deps to highest version with go <= %s", goVer)
-	direct := make([]string, 0)
-	for _, r := range listModules(true) {
+	directRows, err := listModules(true)
+	if err != nil {
+		return err
+	}
+	direct := make([]string, 0, len(directRows))
+	for _, r := range directRows {
 		direct = append(direct, r.Path)
 	}
-	if bad := pinBatch(direct, target, "", jobs); len(bad) > 0 {
+	pinned := pinBatch(direct, target, "", jobs)
+	if len(pinned.incompatible) > 0 {
 		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s",
-			goVer, strings.Join(bad.sorted(), ", "))
+			goVer, strings.Join(pinned.incompatible.sorted(), ", "))
 	}
+	if len(pinned.getFailed) > 0 {
+		return fmt.Errorf("go get failed for direct dep(s): %s",
+			strings.Join(pinned.getFailed.sorted(), ", "))
+	}
+	// pinned.noVersions is not fatal here: an untagged direct dep stays at the
+	// version it already had, which may well satisfy the target. The violator
+	// check below is what decides.
+
 	// `go get` may raise the go directive when a fetched module declares
 	// `go > current`. Re-pin to the user's target so the bump never sticks.
 	if err := editLocalGoMod(target); err != nil {
@@ -433,13 +522,16 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 
 	skip := set{}
 	for n := 1; n <= rounds; n++ {
-		var offenders []string
-		for _, r := range listModules(false) {
-			if r.GoVersion != "" && compareGo(r.GoVersion, target) > 0 && !skip.has(r.Path) {
-				offenders = append(offenders, r.Path)
-			}
+		rows, err := listModules(false)
+		if err != nil {
+			return err
 		}
+		violating, offenders := partitionViolators(rows, target, skip)
 		if len(offenders) == 0 {
+			if len(violating) > 0 {
+				return fmt.Errorf("gave up on %d module(s) still requiring go > %s: %s",
+					len(violating), goVer, strings.Join(violating, ", "))
+			}
 			if !noTidy {
 				if err := runStream("go", "mod", "tidy", "-go="+goVer); err != nil {
 					return fmt.Errorf("go mod tidy: %w", err)
@@ -449,7 +541,7 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 			return nil
 		}
 		info("Round %d: %d offending indirect(s)", n, len(offenders))
-		for m := range pinBatch(offenders, target, fmt.Sprintf("[round %d] ", n), jobs) {
+		for _, m := range pinBatch(offenders, target, fmt.Sprintf("[round %d] ", n), jobs).stuck() {
 			skip.add(m)
 		}
 		if err := editLocalGoMod(target); err != nil {

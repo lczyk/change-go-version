@@ -349,6 +349,68 @@ func TestCheckLocalGoDirective(t *testing.T) {
 	assert.Equal(t, checkLocalGoDirective(), "")
 }
 
+func TestLastLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"one", "one"},
+		{"one\ntwo", "two"},
+		{"one\ntwo\n", "two"},
+		{"one\ntwo\n\n\n", "two"},
+		{"", "unknown"},
+		{"   \n  \n", "unknown"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, lastLine(tc.in), tc.want)
+	}
+}
+
+func TestPinOutcomeStuck(t *testing.T) {
+	o := pinOutcome{incompatible: set{}, noVersions: set{}, getFailed: set{}}
+	assert.Len(t, o.stuck(), 0)
+
+	o.incompatible.add("c")
+	o.noVersions.add("a")
+	o.getFailed.add("b")
+	o.getFailed.add("c") // present in two buckets; must appear once
+	assert.EqualArrays(t, o.stuck(), []string{"a", "b", "c"})
+}
+
+// A module we gave up on (in skip) must still show up in violating. This is
+// what stops runChange reporting success while a dep requires go > target.
+func TestPartitionViolators(t *testing.T) {
+	rows := []modRow{
+		{Path: "ok", GoVersion: "1.20"},
+		{Path: "equal", GoVersion: "1.22"},
+		{Path: "unknown", GoVersion: ""}, // no GoVersion reported: not judged
+		{Path: "bad", GoVersion: "1.24"},
+		{Path: "skipped", GoVersion: "1.25"},
+	}
+	violating, offenders := partitionViolators(rows, "1.22", set{"skipped": {}})
+
+	assert.EqualArrays(t, violating, []string{"bad", "skipped"})
+	assert.EqualArrays(t, offenders, []string{"bad"})
+}
+
+// Everything compliant: both lists empty, which is the only shape that lets
+// runChange declare success.
+func TestPartitionViolatorsAllClean(t *testing.T) {
+	rows := []modRow{
+		{Path: "a", GoVersion: "1.20"},
+		{Path: "b", GoVersion: "1.22"},
+	}
+	violating, offenders := partitionViolators(rows, "1.22", set{})
+	assert.Len(t, violating, 0)
+	assert.Len(t, offenders, 0)
+}
+
+// The regression that motivated the violating/offenders split: every violator
+// is skipped, so offenders is empty -- but the target is NOT met.
+func TestPartitionViolatorsAllSkipped(t *testing.T) {
+	rows := []modRow{{Path: "bad", GoVersion: "1.24"}}
+	violating, offenders := partitionViolators(rows, "1.22", set{"bad": {}})
+	assert.Len(t, offenders, 0)
+	assert.EqualArrays(t, violating, []string{"bad"})
+}
+
 func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
