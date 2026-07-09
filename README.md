@@ -3,7 +3,6 @@
 ![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/lczyk/change-go-version)
 ![GitHub Tag](https://img.shields.io/github/v/tag/lczyk/change-go-version?label=release)
 [![lint_and_test](https://github.com/lczyk/change-go-version/actions/workflows/lint_and_test.yml/badge.svg)](https://github.com/lczyk/change-go-version/actions/workflows/lint_and_test.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/lczyk/change-go-version)](https://goreportcard.com/report/github.com/lczyk/change-go-version)
 
 set `go` directive to a target version, then move every dependency to the highest version whose own `go.mod` declares `go <= TARGET`.
 
