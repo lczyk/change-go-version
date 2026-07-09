@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	goversion "go/version"
 	"net/http"
 	"os"
 	"os/exec"
@@ -68,8 +69,41 @@ func canonGoVersion(v string) string {
 	return semver.Canonical("v" + v)
 }
 
-// compareGo orders two Go directive values; returns -1, 0, or 1.
-func compareGo(a, b string) int { return semver.Compare(canonGoVersion(a), canonGoVersion(b)) }
+// goToken renders a Go directive value ("1.24", "go1.24.3", "v1.24") as the
+// "go1.24" form that go/version expects.
+func goToken(v string) string {
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimPrefix(v, "go")
+	return "go" + v
+}
+
+// compareGo orders two Go directive values using the Go toolchain's own
+// ordering, where a bare language version "1.23" sorts *below* the release
+// "1.23.0" (and below the pre-release "1.23rc1"). A plain semver compare gets
+// this wrong by treating "1.23" and "1.23.0" as equal -- but a dependency
+// declaring "go 1.23.0" is genuinely not satisfied by a 1.23 toolchain, so the
+// distinction is load-bearing when we decide which deps a target admits.
+func compareGo(a, b string) int { return goversion.Compare(goToken(a), goToken(b)) }
+
+// languageVersionTarget reports whether target names a Go *language* version
+// like "1.23" (major.minor, no patch) rather than a specific release like
+// "1.23.0", and returns the cleaned "1.23" form. The two are not
+// interchangeable in a go.mod `go` directive: "1.23" sorts below "1.23.0".
+func languageVersionTarget(target string) (clean string, ok bool) {
+	v := normalizeTarget(target)
+	for i, r := range v {
+		if !(r >= '0' && r <= '9' || r == '.') {
+			v = v[:i]
+			break
+		}
+	}
+	v = strings.TrimRight(v, ".")
+	parts := strings.Split(v, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	return v, true
+}
 
 func goEnv() []string { return append(os.Environ(), "GOTOOLCHAIN=local") }
 
@@ -605,6 +639,10 @@ func main() {
 
 	if msg := checkLocalGoDirective(); msg != "" {
 		warn("%s", msg)
+	}
+
+	if v, ok := languageVersionTarget(opts.To); ok {
+		warn("go %s is not equivalent to %s.0 -- %q is the Go language version and sorts below the %q release, so deps declaring %s.0 are excluded. See https://go.dev/doc/toolchain#version", v, v, v, v+".0", v)
 	}
 
 	snap := backupModFiles()

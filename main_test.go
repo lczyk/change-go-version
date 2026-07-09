@@ -83,17 +83,44 @@ func TestCompareGo(t *testing.T) {
 		a, b string
 		want int
 	}{
-		{"1.22", "1.22.0", 0},
+		// Go's toolchain ordering: language version 1.23 < 1.23rc1 < 1.23.0.
+		{"1.22", "1.22.0", -1}, // bare minor sorts below the .0 release
 		{"1.21", "1.22", -1},
 		{"1.22.1", "1.22", 1},
 		{"1.22", "1.22.1", -1},
 		{"2.0", "1.99.99", 1},
 		{"1.22.3", "1.22.3", 0},
-		{"go1.22", "1.22.0", 0},
-		{"1.22rc1", "1.22", 0},
+		{"go1.22", "1.22.0", -1}, // prefix stripped, still below .0
+		{"1.22rc1", "1.22", 1},   // rc sorts above the language version
+		{"1.22", "1.22rc1", -1},
+		{"1.22rc1", "1.22.0", -1}, // rc sorts below the release
 	}
 	for _, tc := range cases {
 		assert.Equal(t, compareGo(tc.a, tc.b), tc.want)
+	}
+}
+
+func TestLanguageVersionTarget(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"1.23", "1.23", true},
+		{"go1.23", "1.23", true},
+		{"v1.23", "1.23", true},
+		{"1.23rc1", "1.23", true}, // pre-release of a bare minor still ambiguous
+		{"1.23.0", "", false},     // explicit patch: unambiguous
+		{"1.23.7", "", false},
+		{"1", "", false}, // no minor
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, ok := languageVersionTarget(tc.in)
+			assert.Equal(t, got, tc.want)
+			assert.Equal(t, ok, tc.wantOK)
+		})
 	}
 }
 

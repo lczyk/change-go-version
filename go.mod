@@ -1,6 +1,6 @@
 module github.com/lczyk/change-go-version
 
-go 1.21
+go 1.22
 
 require (
 	github.com/jessevdk/go-flags v1.6.1
