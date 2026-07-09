@@ -94,6 +94,14 @@ func TestCompareGo(t *testing.T) {
 		{"1.22rc1", "1.22", 1},   // rc sorts above the language version
 		{"1.22", "1.22rc1", -1},
 		{"1.22rc1", "1.22.0", -1}, // rc sorts below the release
+		// Boundary: the language-vs-release split only exists from 1.21 on
+		// (go1.21.0 was the first release with an explicit .0). For 1.20 and
+		// below, "1.N" and "1.N.0" are equal -- this is what makes the bare
+		// language-version target warning spurious below 1.21.
+		{"1.20", "1.20.0", 0},
+		{"1.20.0", "1.20", 0},
+		{"1.19", "1.19.0", 0},
+		{"1.21", "1.21.0", -1}, // first minor where the split appears
 	}
 	for _, tc := range cases {
 		assert.Equal(t, compareGo(tc.a, tc.b), tc.want)

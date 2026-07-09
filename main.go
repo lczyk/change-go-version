@@ -733,7 +733,11 @@ func main() {
 		warn("%s", msg)
 	}
 
-	if v, ok := languageVersionTarget(opts.To); ok {
+	// Only warn when the .0 release actually sorts above the bare target, i.e.
+	// is genuinely excluded. For go <= 1.20 the toolchain treats "1.N" and
+	// "1.N.0" as equal (go1.21.0 was the first release with an explicit .0), so
+	// the distinction -- and the warning -- would be spurious.
+	if v, ok := languageVersionTarget(opts.To); ok && compareGo(v+".0", v) > 0 {
 		warn("go %s is not equivalent to %s.0 -- %q is the Go language version and sorts below the %q release, so deps declaring %s.0 are excluded. See https://go.dev/doc/toolchain#version", v, v, v, v+".0", v)
 	}
 
