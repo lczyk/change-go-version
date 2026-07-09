@@ -36,9 +36,10 @@ however, with `change-go-version`:
 
 ```bash
 $ go run github.com/lczyk/change-go-version@latest --to 1.21
-INFO: Pinning direct deps to highest version with go <= 1.21.0
+WARNING: go 1.21 is not equivalent to 1.21.0 -- "1.21" is the Go language version and sorts below the "1.21.0" release, so deps declaring 1.21.0 are excluded. See https://go.dev/doc/toolchain#version
+INFO: Pinning direct deps to highest version with go <= 1.21
 INFO: golang.org/x/mod -> v0.20.0  (declares go 1.18)
-INFO: Done. go directive: 1.21.0
+INFO: Done. go directive: 1.21
 ```
 
 and
@@ -46,10 +47,12 @@ and
 ```
 module my-little-module
 
-go 1.21.0
+go 1.21
 
 require golang.org/x/mod v0.20.0
 ```
+
+Pass `--to 1.21.0` instead of `--to 1.21` if you want the release version in the directive (and to silence the warning above); the two are [not the same](https://go.dev/doc/toolchain#version) to the Go toolchain.
 
 ## why
 
