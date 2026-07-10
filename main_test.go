@@ -489,3 +489,34 @@ func TestRunCheckUsesLocalToolchain(t *testing.T) {
 	t.Setenv("GOTOOLCHAIN", "auto")
 	assert.NoError(t, runCheck(context.Background(), `test "$GOTOOLCHAIN" = local`))
 }
+
+func TestSearchAutoChecksCurrentMinorPatches(t *testing.T) {
+	var tried []string
+	result, err := searchAuto("1.24.3", func(minor int) (int, bool) {
+		return 0, true
+	}, func(candidate string) (bool, error) {
+		tried = append(tried, candidate)
+		return candidate == "1.24.2" || candidate == "1.24.1", nil
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, result, "1.24.1")
+	assert.EqualArrays(t, tried, []string{"1.24", "1.24.2", "1.24.1", "1.24.0"})
+}
+
+func TestSearchAutoChecksZeroPatch(t *testing.T) {
+	var tried []string
+	result, err := searchAuto("1.24", func(minor int) (int, bool) {
+		if minor == 23 {
+			return 2, true
+		}
+		return -1, true
+	}, func(candidate string) (bool, error) {
+		tried = append(tried, candidate)
+		return candidate != "1.23", nil
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, result, "1.23.0")
+	assert.EqualArrays(t, tried, []string{"1.23", "1.23.2", "1.23.1", "1.23.0"})
+}

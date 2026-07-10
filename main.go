@@ -695,13 +695,66 @@ func latestPatch(minor int) (int, bool) {
 	return best, true
 }
 
-// runAuto walks the go directive downwards by minor (1.X), accepting each
-// passing version. On a failing minor, it tries the latest released patch
-// for that minor (1.X.<latest>); if that fails the search ends (no lower
-// patch can plausibly help). If it passes, patches are walked downward from
-// latest-1; each passing one becomes the new accepted version, and the walk
-// stops at the first failing patch. Final result is the lowest passing
-// version found (or baseline if none).
+// searchAuto finds the lowest passing version under the assumption that
+// compatibility is monotonic: once a candidate fails, lower candidates fail
+// too. It probes each minor's lowest form first, then walks patches downward
+// only when that lower bound fails.
+func searchAuto(
+	initial string,
+	maxPatch func(int) (int, bool),
+	try func(string) (bool, error),
+) (string, error) {
+	startMinor := minorOf(canonGoVersion(initial))
+	initialPatch, initialHasPatch := patchOf(initial)
+	lastGood := initial
+
+	for minor := startMinor; minor >= 0; minor-- {
+		if minor == startMinor && !initialHasPatch {
+			continue
+		}
+
+		bare := fmt.Sprintf("1.%d", minor)
+		passed, err := try(bare)
+		if err != nil {
+			return "", err
+		}
+		if passed {
+			lastGood = bare
+			continue
+		}
+
+		maxP := initialPatch - 1
+		if minor != startMinor {
+			var ok bool
+			maxP, ok = maxPatch(minor)
+			if !ok {
+				return lastGood, nil
+			}
+		}
+		for patch := maxP; patch >= 0; patch-- {
+			candidate := fmt.Sprintf("1.%d.%d", minor, patch)
+			if compareGo(candidate, bare) == 0 {
+				continue
+			}
+			passed, err := try(candidate)
+			if err != nil {
+				return "", err
+			}
+			if !passed {
+				return lastGood, nil
+			}
+			lastGood = candidate
+		}
+
+		// Bare form already failed, so no older minor can be the compatibility
+		// floor even when every explicit patch passed.
+		return lastGood, nil
+	}
+
+	return lastGood, nil
+}
+
+// runAuto applies searchAuto and keeps the latest snapshot that passed.
 func runAuto(ctx context.Context, checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
 	initial, err := readLocalGoDirective()
 	if err != nil {
@@ -712,60 +765,20 @@ func runAuto(ctx context.Context, checkCmd string, rounds, jobs int, noTidy bool
 		return fmt.Errorf("baseline check failed at go %s: %w", initial, err)
 	}
 
-	startMinor := minorOf(canonGoVersion(initial))
-	lastGood := initial
 	lastGoodSnap := baseline
-outer:
-	for x := startMinor - 1; x >= 0; x-- {
-		cand := fmt.Sprintf("1.%d", x)
-		if tryVersion(ctx, cand, rounds, jobs, noTidy, baseline, checkCmd) {
-			lastGood = cand
-			lastGoodSnap, err = backupModFiles()
-			if err != nil {
-				return err
-			}
-			continue
+	lastGood, err := searchAuto(initial, latestPatch, func(candidate string) (bool, error) {
+		if !tryVersion(ctx, candidate, rounds, jobs, noTidy, baseline, checkCmd) {
+			return false, ctx.Err()
 		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		maxP, _ := latestPatch(x)
-		if maxP <= 0 {
-			info("Auto: 1.%d.0 failed; no released patches to try", x)
-			break
-		}
-		topCand := fmt.Sprintf("1.%d.%d", x, maxP)
-		info("Auto: 1.%d.0 failed; trying latest patch %s", x, topCand)
-		if !tryVersion(ctx, topCand, rounds, jobs, noTidy, baseline, checkCmd) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			break outer
-		}
-		lastGood = topCand
 		lastGoodSnap, err = backupModFiles()
-		if err != nil {
-			return err
-		}
-		for y := maxP - 1; y >= 1; y-- {
-			cand := fmt.Sprintf("1.%d.%d", x, y)
-			if !tryVersion(ctx, cand, rounds, jobs, noTidy, baseline, checkCmd) {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				break outer
-			}
-			lastGood = cand
-			lastGoodSnap, err = backupModFiles()
-			if err != nil {
-				return err
-			}
-		}
-		break outer
+		return true, err
+	})
+	if err != nil {
+		return err
 	}
 
 	lastGoodSnap.restore()
-	if canonGoVersion(lastGood) == canonGoVersion(initial) {
+	if compareGo(lastGood, initial) == 0 {
 		info("Auto: no version below %s passes; baseline restored", initial)
 	} else {
 		info("Auto: lowest passing go version: %s (applied)", lastGood)

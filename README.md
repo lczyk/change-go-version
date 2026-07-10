@@ -87,7 +87,9 @@ go run github.com/lczyk/change-go-version@latest --auto "go test ./..."
 
 ## auto mode
 
-reads the current `go` directive, verifies `--check` passes at the baseline, then for each minor version below current (e.g. 1.24 -> 1.23 -> 1.22 ...) it: restores the original `go.mod`/`go.sum`, runs `change` to that candidate, then runs `--check`. it stops on the first failure. the lowest passing version is left applied; if nothing below the baseline passes, baseline is restored unchanged.
+reads the current `go` directive and verifies the `--auto` command at the baseline. it then searches lower versions, including lower patches in the current minor. each candidate starts from the original `go.mod`/`go.sum`, applies the version change, then runs the verification command.
+
+the search assumes compatibility is monotonic: once a candidate fails, lower candidates will fail too. it probes the lowest form of each minor first, then walks patches downward when needed. the lowest passing version found is left applied; if nothing below the baseline passes, baseline is restored unchanged.
 
 ## behaviour
 
