@@ -151,7 +151,8 @@ func TestSnapshotBackupRestore(t *testing.T) {
 	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\ngo 1.22\n"), 0o644))
 	// no go.sum
 
-	snap := backupModFiles()
+	snap, err := backupModFiles()
+	assert.NoError(t, err)
 
 	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\ngo 1.99\n"), 0o644))
 	assert.NoError(t, os.WriteFile("go.sum", []byte("garbage\n"), 0o644))
@@ -302,7 +303,8 @@ func TestSnapshotPreservesInvalidGoDirective(t *testing.T) {
 	original := "module x\n\ngo 1.21.99\n"
 	assert.NoError(t, os.WriteFile("go.mod", []byte(original), 0o644))
 
-	snap := backupModFiles()
+	snap, err := backupModFiles()
+	assert.NoError(t, err)
 
 	assert.NoError(t, os.WriteFile("go.mod", []byte("module x\n\ngo 1.22\n"), 0o644))
 	assert.NoError(t, os.WriteFile("go.sum", []byte("scratch\n"), 0o644))
@@ -423,7 +425,8 @@ func TestSnapshotRestoreMissing(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
 
-	snap := backupModFiles()
+	snap, err := backupModFiles()
+	assert.NoError(t, err)
 
 	assert.NoError(t, os.WriteFile("go.mod", []byte("x"), 0o644))
 	assert.NoError(t, os.WriteFile("go.sum", []byte("y"), 0o644))
@@ -434,4 +437,20 @@ func TestSnapshotRestoreMissing(t *testing.T) {
 		_, err := os.Stat(filepath.Join(dir, p))
 		assert.That(t, os.IsNotExist(err), p+" should not exist after restore")
 	}
+}
+
+func TestSnapshotReadFailureDoesNotDeletePath(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	// A directory gives ReadFile a deterministic non-IsNotExist error on every
+	// platform. Treating that error as "missing" makes restore remove the path.
+	assert.NoError(t, os.Mkdir("go.mod", 0o755))
+
+	_, err := backupModFiles()
+	assert.That(t, err != nil, "unreadable go.mod path should abort snapshot")
+
+	info, err := os.Stat("go.mod")
+	assert.NoError(t, err)
+	assert.That(t, info.IsDir(), "go.mod path should not have been deleted")
 }

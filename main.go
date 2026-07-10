@@ -402,17 +402,20 @@ type snapshot struct {
 	files map[string][]byte // nil value = file did not exist
 }
 
-func backupModFiles() snapshot {
+func backupModFiles() (snapshot, error) {
 	s := snapshot{files: map[string][]byte{}}
 	for _, p := range []string{"go.mod", "go.sum"} {
 		data, err := os.ReadFile(p)
-		if err != nil {
+		if os.IsNotExist(err) {
 			s.files[p] = nil
 			continue
 		}
+		if err != nil {
+			return snapshot{}, fmt.Errorf("snapshot %s: %w", p, err)
+		}
 		s.files[p] = data
 	}
-	return s
+	return s, nil
 }
 
 func (s snapshot) restore() {
@@ -687,7 +690,10 @@ outer:
 		cand := fmt.Sprintf("1.%d", x)
 		if tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
 			lastGood = cand
-			lastGoodSnap = backupModFiles()
+			lastGoodSnap, err = backupModFiles()
+			if err != nil {
+				return err
+			}
 			continue
 		}
 		maxP, _ := latestPatch(x)
@@ -701,14 +707,20 @@ outer:
 			break outer
 		}
 		lastGood = topCand
-		lastGoodSnap = backupModFiles()
+		lastGoodSnap, err = backupModFiles()
+		if err != nil {
+			return err
+		}
 		for y := maxP - 1; y >= 1; y-- {
 			cand := fmt.Sprintf("1.%d.%d", x, y)
 			if !tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
 				break outer
 			}
 			lastGood = cand
-			lastGoodSnap = backupModFiles()
+			lastGoodSnap, err = backupModFiles()
+			if err != nil {
+				return err
+			}
 		}
 		break outer
 	}
@@ -775,7 +787,11 @@ func main() {
 		warn("go %s is not equivalent to %s.0 -- %q is the Go language version and sorts below the %q release, so deps declaring %s.0 are excluded. See https://go.dev/doc/toolchain#version", v, v, v, v+".0", v)
 	}
 
-	snap := backupModFiles()
+	snap, err := backupModFiles()
+	if err != nil {
+		errlog("%v", err)
+		os.Exit(1)
+	}
 
 	// Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
 	// and go.sum exactly as we found them. Without this, killing a long
