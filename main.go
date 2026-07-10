@@ -7,8 +7,10 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	goversion "go/version"
 	"net/http"
@@ -107,9 +109,24 @@ func languageVersionTarget(target string) (clean string, ok bool) {
 
 func goEnv() []string { return append(os.Environ(), "GOTOOLCHAIN=local") }
 
+// commandContext puts the command and its descendants in a process group.
+// Cancellation kills the group before Run returns, making later restores safe.
+func commandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return cmd
+}
+
 // runCapture runs a command and captures stdout/stderr.
-func runCapture(name string, args ...string) (stdout, stderr string, err error) {
-	cmd := exec.Command(name, args...)
+func runCapture(ctx context.Context, name string, args ...string) (stdout, stderr string, err error) {
+	cmd := commandContext(ctx, name, args...)
 	cmd.Env = goEnv()
 	var so, se strings.Builder
 	cmd.Stdout = &so
@@ -119,8 +136,8 @@ func runCapture(name string, args ...string) (stdout, stderr string, err error) 
 }
 
 // runStream runs a command with stdout/stderr passed through.
-func runStream(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func runStream(ctx context.Context, name string, args ...string) error {
+	cmd := commandContext(ctx, name, args...)
 	cmd.Env = goEnv()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -164,9 +181,9 @@ func editLocalGoMod(target string) error {
 // <mod>@<ver>'s go.mod. goVersion is "" only when the module could not be
 // downloaded/read; a module with no go directive reports "1.0" (as the Go
 // toolchain does). requires is nil when the go.mod could not be parsed.
-func declaredMod(mod, ver string) (goVersion string, requires []module.Version) {
+func declaredMod(ctx context.Context, mod, ver string) (goVersion string, requires []module.Version) {
 	mv := module.Version{Path: mod, Version: ver}
-	stdout, _, err := runCapture("go", "mod", "download", "-json", mv.String())
+	stdout, _, err := runCapture(ctx, "go", "mod", "download", "-json", mv.String())
 	if err != nil || stdout == "" {
 		return "", nil
 	}
@@ -204,8 +221,8 @@ func lastLine(s string) string {
 // listVersions returns the module's tagged versions, newest-first. An empty
 // slice and a nil error means the module has no tagged releases (it is only
 // reachable at a pseudo-version).
-func listVersions(mod string) ([]string, error) {
-	stdout, stderr, err := runCapture("go", "list", "-m", "-versions", mod)
+func listVersions(ctx context.Context, mod string) ([]string, error) {
+	stdout, stderr, err := runCapture(ctx, "go", "list", "-m", "-versions", mod)
 	if err != nil {
 		return nil, fmt.Errorf("%s", lastLine(stderr))
 	}
@@ -235,9 +252,9 @@ const (
 // the testify<->objx style oscillation, where the newest compatible version of
 // a dep `require`s an indirect that itself declares a newer go, so pinning the
 // indirect down never sticks -- MVS keeps re-raising it to that floor.
-func requiresExceedTarget(reqs []module.Version, target string) bool {
+func requiresExceedTarget(ctx context.Context, reqs []module.Version, target string) bool {
 	for _, r := range reqs {
-		gv, _ := declaredMod(r.Path, r.Version)
+		gv, _ := declaredMod(ctx, r.Path, r.Version)
 		if gv == "" {
 			continue // missing data; don't reject on a failed lookup
 		}
@@ -248,8 +265,8 @@ func requiresExceedTarget(reqs []module.Version, target string) bool {
 	return false
 }
 
-func pickVersion(mod, target string) (ver, declared string, status pickStatus) {
-	versions, err := listVersions(mod)
+func pickVersion(ctx context.Context, mod, target string) (ver, declared string, status pickStatus) {
+	versions, err := listVersions(ctx, mod)
 	// No enumerable releases -- an untagged module, an unreachable proxy, a
 	// module only ever used at a pseudo-version. That is not the same as
 	// "every release is too new": there is simply nothing to pick, so the
@@ -258,14 +275,14 @@ func pickVersion(mod, target string) (ver, declared string, status pickStatus) {
 		return "", "", pickNoVersions
 	}
 	for _, v := range versions {
-		gv, requires := declaredMod(mod, v)
+		gv, requires := declaredMod(ctx, mod, v)
 		if gv == "" {
 			continue
 		}
 		if compareGo(gv, target) > 0 {
 			continue // the module itself declares go > target
 		}
-		if requiresExceedTarget(requires, target) {
+		if requiresExceedTarget(ctx, requires, target) {
 			continue // its own requirements would force go > target
 		}
 		return v, gv, pickOK
@@ -278,9 +295,9 @@ type modRow struct{ Path, Version, GoVersion string }
 // listModules returns the build list. `go list -e` keeps per-module problems
 // (bad paths, deps requiring a newer go) out of the exit code, so a non-zero
 // exit means the module graph could not be loaded at all.
-func listModules(directOnly bool) ([]modRow, error) {
+func listModules(ctx context.Context, directOnly bool) ([]modRow, error) {
 	const fmtTpl = "{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.GoVersion}}\t{{.Indirect}}{{end}}"
-	stdout, stderr, err := runCapture("go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
+	stdout, stderr, err := runCapture(ctx, "go", "list", "-mod=mod", "-e", "-m", "-f", fmtTpl, "all")
 	if err != nil {
 		return nil, fmt.Errorf("go list -m all: %s", lastLine(stderr))
 	}
@@ -337,7 +354,7 @@ func (o pinOutcome) stuck() []string {
 }
 
 // pinBatch probes versions for each mod in parallel, then `go get`s them serially.
-func pinBatch(mods []string, target, label string, jobs int) pinOutcome {
+func pinBatch(ctx context.Context, mods []string, target, label string, jobs int) pinOutcome {
 	type result struct {
 		mod, ver, gv string
 		status       pickStatus
@@ -352,7 +369,7 @@ func pinBatch(mods []string, target, label string, jobs int) pinOutcome {
 		go func(i int, m string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			v, gv, status := pickVersion(m, target)
+			v, gv, status := pickVersion(ctx, m, target)
 			results[i] = result{m, v, gv, status}
 		}(i, m)
 	}
@@ -360,6 +377,9 @@ func pinBatch(mods []string, target, label string, jobs int) pinOutcome {
 
 	out := pinOutcome{incompatible: set{}, noVersions: set{}, getFailed: set{}}
 	for _, r := range results {
+		if ctx.Err() != nil {
+			break
+		}
 		switch r.status {
 		case pickNoVersions:
 			warn("no selectable versions for %s; leaving it at its current version", r.mod)
@@ -372,7 +392,7 @@ func pinBatch(mods []string, target, label string, jobs int) pinOutcome {
 		}
 		info("%s%s -> %s  (declares go %s)", label, r.mod, r.ver, r.gv)
 		mv := module.Version{Path: r.mod, Version: r.ver}
-		if _, stderr, err := runCapture("go", "get", mv.String()); err != nil {
+		if _, stderr, err := runCapture(ctx, "go", "get", mv.String()); err != nil {
 			warn("go get failed for %s: %s", r.mod, lastLine(stderr))
 			out.getFailed.add(r.mod)
 		}
@@ -456,8 +476,8 @@ func readLocalGoDirective() (string, error) {
 }
 
 // runCheck runs the user's verification command via /bin/sh -c, streaming stdio.
-func runCheck(cmd string) error {
-	c := exec.Command("sh", "-c", cmd)
+func runCheck(ctx context.Context, cmd string) error {
+	c := commandContext(ctx, "sh", "-c", cmd)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
@@ -519,8 +539,11 @@ func checkLocalGoDirective() string {
 	return ""
 }
 
-func runChange(target string, rounds, jobs int, noTidy bool) error {
+func runChange(ctx context.Context, target string, rounds, jobs int, noTidy bool) error {
 	if err := validateTarget(target); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	goVer := normalizeTarget(target)
@@ -530,7 +553,7 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 	}
 
 	info("Pinning direct deps to highest version with go <= %s", goVer)
-	directRows, err := listModules(true)
+	directRows, err := listModules(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -538,7 +561,10 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 	for _, r := range directRows {
 		direct = append(direct, r.Path)
 	}
-	pinned := pinBatch(direct, target, "", jobs)
+	pinned := pinBatch(ctx, direct, target, "", jobs)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(pinned.incompatible) > 0 {
 		return fmt.Errorf("no version compatible with go %s for direct dep(s): %s",
 			goVer, strings.Join(pinned.incompatible.sorted(), ", "))
@@ -559,7 +585,7 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 
 	skip := set{}
 	for n := 1; n <= rounds; n++ {
-		rows, err := listModules(false)
+		rows, err := listModules(ctx, false)
 		if err != nil {
 			return err
 		}
@@ -570,7 +596,7 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 					len(violating), goVer, strings.Join(violating, ", "))
 			}
 			if !noTidy {
-				if err := runStream("go", "mod", "tidy", "-go="+goVer); err != nil {
+				if err := runStream(ctx, "go", "mod", "tidy", "-go="+goVer); err != nil {
 					return fmt.Errorf("go mod tidy: %w", err)
 				}
 			}
@@ -578,8 +604,11 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 			return nil
 		}
 		info("Round %d: %d offending indirect(s)", n, len(offenders))
-		for _, m := range pinBatch(offenders, target, fmt.Sprintf("[round %d] ", n), jobs).stuck() {
+		for _, m := range pinBatch(ctx, offenders, target, fmt.Sprintf("[round %d] ", n), jobs).stuck() {
 			skip.add(m)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := editLocalGoMod(target); err != nil {
 			return err
@@ -590,14 +619,14 @@ func runChange(target string, rounds, jobs int, noTidy bool) error {
 
 // tryVersion restores baseline, applies cand via runChange, then runs checkCmd.
 // Returns true iff both steps succeed.
-func tryVersion(cand string, rounds, jobs int, noTidy bool, baseline snapshot, checkCmd string) bool {
+func tryVersion(ctx context.Context, cand string, rounds, jobs int, noTidy bool, baseline snapshot, checkCmd string) bool {
 	baseline.restore()
 	info("Auto: trying go %s ...", cand)
-	if err := runChange(cand, rounds, jobs, noTidy); err != nil {
+	if err := runChange(ctx, cand, rounds, jobs, noTidy); err != nil {
 		warn("Auto: change to %s failed: %v", cand, err)
 		return false
 	}
-	if err := runCheck(checkCmd); err != nil {
+	if err := runCheck(ctx, checkCmd); err != nil {
 		warn("Auto: check failed at go %s", cand)
 		return false
 	}
@@ -672,13 +701,13 @@ func latestPatch(minor int) (int, bool) {
 // latest-1; each passing one becomes the new accepted version, and the walk
 // stops at the first failing patch. Final result is the lowest passing
 // version found (or baseline if none).
-func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
+func runAuto(ctx context.Context, checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) error {
 	initial, err := readLocalGoDirective()
 	if err != nil {
 		return err
 	}
 	info("Auto: baseline go %s; verifying check command...", initial)
-	if err := runCheck(checkCmd); err != nil {
+	if err := runCheck(ctx, checkCmd); err != nil {
 		return fmt.Errorf("baseline check failed at go %s: %w", initial, err)
 	}
 
@@ -688,13 +717,16 @@ func runAuto(checkCmd string, rounds, jobs int, noTidy bool, baseline snapshot) 
 outer:
 	for x := startMinor - 1; x >= 0; x-- {
 		cand := fmt.Sprintf("1.%d", x)
-		if tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
+		if tryVersion(ctx, cand, rounds, jobs, noTidy, baseline, checkCmd) {
 			lastGood = cand
 			lastGoodSnap, err = backupModFiles()
 			if err != nil {
 				return err
 			}
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		maxP, _ := latestPatch(x)
 		if maxP <= 0 {
@@ -703,7 +735,10 @@ outer:
 		}
 		topCand := fmt.Sprintf("1.%d.%d", x, maxP)
 		info("Auto: 1.%d.0 failed; trying latest patch %s", x, topCand)
-		if !tryVersion(topCand, rounds, jobs, noTidy, baseline, checkCmd) {
+		if !tryVersion(ctx, topCand, rounds, jobs, noTidy, baseline, checkCmd) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			break outer
 		}
 		lastGood = topCand
@@ -713,7 +748,10 @@ outer:
 		}
 		for y := maxP - 1; y >= 1; y-- {
 			cand := fmt.Sprintf("1.%d.%d", x, y)
-			if !tryVersion(cand, rounds, jobs, noTidy, baseline, checkCmd) {
+			if !tryVersion(ctx, cand, rounds, jobs, noTidy, baseline, checkCmd) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				break outer
 			}
 			lastGood = cand
@@ -793,24 +831,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Restore baseline on SIGINT/SIGTERM so an interrupted run leaves go.mod
-	// and go.sum exactly as we found them. Without this, killing a long
-	// `--auto` mid-iteration leaves the working tree at whatever candidate
-	// was being probed.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		errlog("Interrupted (%s); restoring go.mod and go.sum", sig)
-		snap.restore()
-		os.Exit(130)
-	}()
+	// Cancel and wait for active commands before restoring. Restoring from the
+	// signal handler would race any child process still writing module files.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	var runErr error
 	if opts.To != "" {
-		runErr = runChange(opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
+		runErr = runChange(ctx, opts.To, opts.Rounds, opts.Jobs, opts.NoTidy)
 	} else {
-		runErr = runAuto(opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
+		runErr = runAuto(ctx, opts.Auto, opts.Rounds, opts.Jobs, opts.NoTidy, snap)
+	}
+	if ctx.Err() != nil {
+		errlog("Interrupted; restoring go.mod and go.sum")
+		snap.restore()
+		os.Exit(130)
 	}
 	if runErr != nil {
 		errlog("%v", runErr)

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/lczyk/assert"
 )
@@ -453,4 +455,32 @@ func TestSnapshotReadFailureDoesNotDeletePath(t *testing.T) {
 	info, err := os.Stat("go.mod")
 	assert.NoError(t, err)
 	assert.That(t, info.IsDir(), "go.mod path should not have been deleted")
+}
+
+func TestRunCheckCancellationStopsDescendants(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runCheck(ctx, "touch started; (sleep 0.2; touch late) & wait")
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat("started"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("check command did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	assert.That(t, <-done != nil, "check command should be cancelled")
+	time.Sleep(300 * time.Millisecond)
+	_, err := os.Stat("late")
+	assert.That(t, os.IsNotExist(err), "cancelled descendant should not mutate files")
 }
