@@ -478,6 +478,7 @@ func readLocalGoDirective() (string, error) {
 // runCheck runs the user's verification command via /bin/sh -c, streaming stdio.
 func runCheck(ctx context.Context, cmd string) error {
 	c := commandContext(ctx, "sh", "-c", cmd)
+	c.Env = goEnv()
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()

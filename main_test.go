@@ -484,3 +484,8 @@ func TestRunCheckCancellationStopsDescendants(t *testing.T) {
 	_, err := os.Stat("late")
 	assert.That(t, os.IsNotExist(err), "cancelled descendant should not mutate files")
 }
+
+func TestRunCheckUsesLocalToolchain(t *testing.T) {
+	t.Setenv("GOTOOLCHAIN", "auto")
+	assert.NoError(t, runCheck(context.Background(), `test "$GOTOOLCHAIN" = local`))
+}
